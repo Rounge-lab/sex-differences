@@ -1,0 +1,2161 @@
+## Investigating microbial sex differences in the CRCbiome study
+
+## This script will cover all analyses performed
+
+
+## loading packages and function -------
+require(ggpubr)
+require(ggrepel)
+require(tidyverse)
+require(vegan)
+require(Maaslin2)
+require(tidyr)
+require(DESeq2)
+require(ecodist)
+require(table1)
+require(nnet)
+require(broom)
+require(gtsummary)
+require(flextable)
+require(rstatix)
+require(mice)
+require(skimr)
+require(mediation)
+require(medflex)
+
+source("scripts/utils.R")
+####################
+
+
+## Importing data ----------------------
+
+
+####################
+
+
+##### mean reads and number of species
+
+tmp <- metadata %>% left_join(data_by_sample)
+mean(tmp$reads_proc)
+sd(tmp$reads_proc)
+mean(tmp$sgb_richness)
+sd(tmp$sgb_richness)
+
+metaphlan %>%
+  rowwise() %>%                                  
+  mutate(columns_above_zero = sum(c_across(everything()) > 0)) %>%  # Count columns > 0
+  ungroup() %>%
+  summarise(mean_columns_above_zero = sd(columns_above_zero)) %>%  # Calculate the mean
+  pull(mean_columns_above_zero)  
+
+## QC and data management --------------
+## calculating alpha diversity based on mphl4 data
+alpha_diversity <- mp4_abundance %>% 
+  as.data.frame() %>% 
+  column_to_rownames("sample_id") %>% 
+  mutate(shannon = diversity(x = ., index = "shannon"),
+         invsimpson = diversity(x = ., index = "invsimpson"),
+         richness = apply(., 1, function(x) sum(x>0))) %>% 
+  dplyr::select(shannon, invsimpson, richness) %>% 
+  rownames_to_column("sample_id")
+
+
+metadata <- sample_meta %>% 
+  left_join(screening_data) %>% 
+  mutate(final_result_cat7 = as.character(final_result_cat7)) %>% 
+  mutate(final_result_cat4 = as.character(final_result_cat4)) %>% 
+  left_join(lifestyle) %>% 
+  left_join(diet, by=c("ffq_ref_nr" = "id")) %>% 
+  left_join(wcrf, by=c("ffq_ref_nr" = "id")) %>% 
+  #dplyr::select(-c("shannon", "invsimpson", "richness")) %>% 
+  left_join(alpha_diversity) %>% 
+  mutate(Cur_smoking_status_3cat = as.character(Cur_smoking_status_3cat)) %>% 
+  mutate(smoking2 = case_when(Cur_smoking_status_3cat %in% c("Smoked earlier", "Current smoker") ~ "Ever smoked", TRUE ~ Cur_smoking_status_3cat)) %>% 
+  mutate(final_result_cat5 = case_when(final_result_cat7 %in% c("Negative", "Non-advanced serrated/other lesion", "Non-advanced adenoma (<3)") ~ "Negative", TRUE ~ final_result_cat7)) %>% 
+  filter(., Prøvetype == "Baseline" & (reads_proc*2*151) >= 1e9) %>% ## subset på qc_atlas over 1 milliard og baseline  
+  mutate(localization = as.character(localization)) %>% 
+  mutate(localization = ifelse(is.na(localization), "Negative", localization)) %>% 
+  mutate(location2 = case_when(localization %in% c("Proximal", "Both") ~ "any Proximal", TRUE ~ localization)) %>%
+  mutate(Bowel_disorder_merged = as.character(Bowel_disorder_merged)) %>% 
+  mutate(bowel_disorder2 = case_when(Bowel_disorder_merged %in% c("Other", "IBD", "IBS", "Celiac disease") ~ "Any disorder", TRUE ~ Bowel_disorder_merged)) %>% 
+  mutate(across(c("Tarmkreft_Familie", "smoking2", "Antibiotics", "bowel_disorder2", "Intolerance", "Nasj_cat2", "Nasj_cat2", "Sivilstatus_cat2", "Utdanning", "Snus"), ~ifelse(. %in% c("Unknown", "Missing"), NA_character_, as.character(.)))) %>% 
+  mutate(shannon_tertile = cut_number(shannon, n=3, labels=c("Low", "Medium", "High"))) %>% 
+  mutate(invsimp_tertile = cut_number(invsimpson, n=3, labels=c("Low", "Medium", "High"))) %>% 
+  inner_join(mp4_abundance %>% dplyr::select(sample_id)) %>% 
+  mutate(final_result_cat5 = case_when(final_result_cat7 %in% c("Negative", "Non-advanced serrated/other lesion", "Non-advanced adenoma (<3)", 
+                                                                "Non-advanced adenoma (>=3)") ~ "Negative", TRUE ~ final_result_cat7)) %>% 
+  mutate(final_result_cat7=factor(final_result_cat7, levels=c("Negative","Non-advanced serrated/other lesion", "Non-advanced adenoma (>=3)", "Advanced serrated", "Advanced adenoma", "CRC"))) %>%
+  mutate(detect_worthy_lesions=factor(detect_worthy_lesions, levels=c("negative", "positive"))) %>%
+  mutate(final_result_cat3_serr=factor(final_result_cat3_serr, levels=c("No adenoma", "Non-advanced adenoma", "Advanced lesion"))) %>%
+  mutate(shannon_tertile=factor(shannon_tertile, levels=c("High", "Medium", "Low"))) %>%
+  mutate(invsimp_tertile=factor(invsimp_tertile, levels=c("High", "Medium", "Low"))) %>%
+  mutate(smoking2=factor(smoking2, levels=c("Never smoked", "Ever smoked"))) %>%
+  mutate(Snus=factor(Snus, levels=c("Non snuser", "Snuser"))) %>% 
+  mutate(Antibiotics=factor(Antibiotics, levels = c("No", "Yes"))) %>%
+  mutate(Nasj_cat2=factor(Nasj_cat2, levels = c("Native", "Non-native"))) %>% 
+  mutate(Tarmkreft_Familie=factor(Tarmkreft_Familie, levels = c("No", "Yes"))) %>% 
+  mutate(Sivilstatus_cat2 = factor(Sivilstatus_cat2, levels=c("Not married/non-cohabiting", "Married/cohabiting"))) %>% 
+  mutate(bowel_disorder2=factor(bowel_disorder2, levels=c("No bowel disease", "Any disorder"))) %>%
+  mutate(location2=factor(location2, levels=c("Negative", "Distal", "any Proximal"))) %>%
+  mutate(Utdanning=factor(Utdanning, levels=c("Primary school", "High school", "University/college"))) %>%
+  # mutate(final_result_serrated = case_when(advanced_serrated == 1 & final_result_cat7 != "CRC" ~ "Any serrated lesion", 
+  #                                          final_result_cat7 == "CRC" ~ "CRC",
+  #                                          final_result_cat7 == "Negative" | final_result_cat7 == "Non-advanced serrated/other lesion" ~ "No adenoma", 
+  #                                          final_result_cat7 == "Non-advanced adenoma (>=3)" ~ "Non-advanced adenoma",
+  #                                          TRUE ~ final_result_cat7)) %>%
+  # mutate(final_result_serrated=factor(final_result_serrated, levels=c("No adenoma", "Non-advanced adenoma", "Advanced adenoma", "Any serrated lesion", "CRC"))) %>%
+  # mutate(final_result_adenoma = case_when(final_result_cat7 == "Negative" | final_result_cat7 == "Non-advanced serrated/other lesion" ~ "No adenoma", 
+  #                                         final_result_cat7 == "Non-advanced adenoma (>=3)" ~ "Non-advanced adenoma",
+  #                                         TRUE ~ final_result_cat7)) %>%
+  # mutate(final_result_adenoma=factor(final_result_adenoma, levels=c("No adenoma", "Non-advanced adenoma", "Advanced adenoma", "Advanced serrated", "CRC"))) %>%
+  mutate(age_invitation = as.numeric(age_invitation), senter = as.factor(senter), sex = as.factor(kjonn)) %>% 
+  mutate(advanced_serrated = factor(advanced_serrated, levels=c("0", "1"))) %>% 
+  as.data.frame() %>% 
+  column_to_rownames("sample_id")
+
+## calculating mean species for men and women seperatly
+
+metadata %>% filter(kjonn == "Male") %>% 
+  summarise(mean_value = mean(richness, na.rm = TRUE),
+            sd_value = sd(richness, na.rm = TRUE))
+
+metadata %>% filter(kjonn == "Female") %>% 
+  summarise(mean_value = mean(richness, na.rm = TRUE),
+            sd_value = sd(richness, na.rm = TRUE))
+
+## set rownames in same order for metadata and count matrices
+metaphlan <- mp4_abundance %>% 
+  inner_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(c("sample_id"))) %>% 
+  column_to_rownames(var="sample_id") %>% 
+  as.data.frame()
+
+geneo <- geneo %>% 
+  as.data.frame() %>%
+  inner_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(c("sample_id"))) %>% 
+  column_to_rownames(var="sample_id") %>% 
+  as.data.frame()
+
+geneo
+ids_extracted <- intersect(rownames(metaphlan), rownames(metadata))
+metaphlan <- metaphlan[ids_extracted, ]
+metadata <- metadata[ids_extracted, ]
+geneo <- geneo[ids_extracted, ]
+all(rownames(metaphlan) == rownames(metadata))
+
+all(rownames(geneo) == rownames(metadata))
+
+
+identical(rownames(geneo), rownames(metaphlan))
+cor_matrix <- cor(geneo, metaphlan, method = "spearman")
+
+## removing hihgly correlated pathways
+high_cor_paths <- colnames(geneo)[apply(cor_matrix, 1, function(x) any(x > 0.5))]
+geneo_filtered <- geneo[, !colnames(geneo) %in% high_cor_paths]
+geneo <- geneo_filtered
+
+#######
+
+## subsetting for stratified analyses
+metadata_controls <- metadata %>% filter(detect_worthy_lesions == "negative")
+metaphlan_controls <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_controls %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+geneo_controls <- geneo %>% rownames_to_column("sample_id") %>% inner_join(metadata_controls %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_controls) == rownames(metadata_controls))
+all(rownames(geneo_controls) == rownames(metadata_controls))
+
+
+metadata_women <- metadata %>% filter(kjonn == "Female")
+metaphlan_women <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_women %>% rownames_to_column("sample_id")%>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+geneo_women <- geneo %>% rownames_to_column("sample_id") %>% inner_join(metadata_women %>% rownames_to_column("sample_id")%>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_women) == rownames(metadata_women))
+all(rownames(geneo_women) == rownames(metadata_women))
+
+
+metadata_men <- metadata %>% filter(kjonn == "Male")
+metaphlan_men <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_men %>% rownames_to_column("sample_id")%>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+geneo_men <- geneo %>% rownames_to_column("sample_id") %>% inner_join(metadata_men %>% rownames_to_column("sample_id")%>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_men) == rownames(metadata_men))
+all(rownames(geneo_men) == rownames(metadata_men))
+
+####################
+
+## Baseline tables ---------------------
+
+table1_basic_all <- metadata %>% 
+  filter(., Prøvetype == "Baseline" & (reads_proc*2*151) >= 1e9) %>%
+  dplyr::select(c(kjonn, age_invitation, senter, Nasj_cat2, Tarmkreft_Familie,  Sivilstatus_cat2, Utdanning, Arbeid_lump, bowel_disorder2, smoking2, Snus, Energi_kcal, Alko, BMI, PhysAct_Score, Antibiotics, FIT_value, wcrf_index_main, reads_proc)) %>% 
+  tbl_summary(
+    # The "by" variable
+    by = kjonn,
+    label = c(age_invitation ~ "Age years", 
+              senter ~ "Screening center",
+              Nasj_cat2 ~ "Nationality",
+              Tarmkreft_Familie ~ "Family history of CRC", 
+              Sivilstatus_cat2 ~ "Marital status",
+              Utdanning ~ "Education",
+              Arbeid_lump ~ "Employment status",
+              bowel_disorder2 ~ "Bowel disorder",
+              smoking2 ~ "Smoking status",
+              Energi_kcal ~ "Energy ",
+              PhysAct_Score ~ "Physical activity min/week",
+              Antibiotics ~ "Antibiotic use last 3 months",
+              FIT_value ~ "FIT value",
+              wcrf_index_main ~ "WCRF/AICR score"),
+    missing = "no",
+    statistic = all_continuous() ~ c("{median} ({p25}, {p75})")) %>% 
+  add_overall(last=T) %>%
+  add_n() %>% 
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits=3)) %>% 
+  add_stat_label() %>% 
+  modify_caption("Table 1. Characteristics of all participants by sex") %>% 
+  as_flex_table() %>% 
+  save_as_docx(path="tables_and_figures/table1_basic_all.docx")
+
+table1_basic_men <- metadata %>% 
+  filter(., kjonn == "Male" & Prøvetype == "Baseline" & (reads_proc*2*151) >= 1e9) %>%
+  dplyr::select(c(final_result_cat3_serr, age_invitation, senter, Nasj_cat2, Tarmkreft_Familie,  Sivilstatus_cat2, Utdanning, Arbeid_lump, bowel_disorder2, smoking2, Snus, Energi_kcal, Alko, BMI, PhysAct_Score, Antibiotics, FIT_value, wcrf_index_main, reads_proc)) %>% 
+  tbl_summary(
+    # The "by" variable
+    by = final_result_cat3_serr,
+    label = c(age_invitation ~ "Age years", 
+              senter ~ "Screening center",
+              Nasj_cat2 ~ "Nationality",
+              Tarmkreft_Familie ~ "Family history of CRC", 
+              Sivilstatus_cat2 ~ "Marital status",
+              Utdanning ~ "Education",
+              Arbeid_lump ~ "Employment status",
+              bowel_disorder2 ~ "Bowel disorder",
+              smoking2 ~ "Smoking status",
+              Energi_kcal ~ "Energy ",
+              PhysAct_Score ~ "Physical activity min/week",
+              Antibiotics ~ "Antibiotic use last 3 months",
+              FIT_value ~ "FIT value",
+              wcrf_index_main ~ "WCRF/AICR score"),
+    missing = "no",
+    statistic = all_continuous() ~ c("{median} ({p25}, {p75})")) %>% 
+  add_overall(last=T) %>%
+  add_n() %>% 
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits=3)) %>% 
+  add_stat_label() %>% 
+  modify_caption("Table 1. Characteristics of male participants by outcome") %>% 
+  as_flex_table() %>% 
+  save_as_docx(path="tables_and_figures/table1_basic_men.docx")
+
+
+table1_basic_women <- metadata %>% 
+  filter(., kjonn == "Female" & Prøvetype == "Baseline" & (reads_proc*2*151) >= 1e9) %>%
+  dplyr::select(c(final_result_cat3_serr, age_invitation, senter, Nasj_cat2, Tarmkreft_Familie,  Sivilstatus_cat2, Utdanning, Arbeid_lump, bowel_disorder2, smoking2, Snus, Energi_kcal, Alko, BMI, PhysAct_Score, Antibiotics, FIT_value, wcrf_index_main, reads_proc)) %>% 
+  tbl_summary(
+    # The "by" variable
+    by = final_result_cat3_serr,
+    label = c(age_invitation ~ "Age years", 
+              senter ~ "Screening center",
+              Nasj_cat2 ~ "Nationality",
+              Tarmkreft_Familie ~ "Family history of CRC", 
+              Sivilstatus_cat2 ~ "Marital status",
+              Utdanning ~ "Education",
+              Arbeid_lump ~ "Employment status",
+              bowel_disorder2 ~ "Bowel disorder",
+              smoking2 ~ "Smoking status",
+              Energi_kcal ~ "Energy ",
+              PhysAct_Score ~ "Physical activity min/week",
+              Antibiotics ~ "Antibiotic use last 3 months",
+              FIT_value ~ "FIT value",
+              wcrf_index_main ~ "WCRF/AICR score"),
+    missing = "no",
+    statistic = all_continuous() ~ c("{median} ({p25}, {p75})")) %>% 
+  add_overall(last=T) %>%
+  add_n() %>% 
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits=3)) %>% 
+  add_stat_label() %>% 
+  modify_caption("Table 1. Characteristics of female participants by outcome") %>% 
+  as_flex_table() %>% 
+  save_as_docx(path="tables_and_figures/table1_basic_women.docx")
+
+####################
+
+## Excluding and imputing data
+####################
+#participants excluded based on 
+exclude <- diet_scr_ls %>%
+  filter(exclude_reserved == 1 | #...reservation
+           exclude_nocolo == 1 | #...not attending colonoscopy
+           exclude_energylow == 1 | #...too low energy intake 
+           exclude_energyhigh == 1 | #...too high energy intake 
+           exclude_FFQquality_low == 1) %>% #...low quality FFQ
+  mutate(id = as.character(id)) %>% 
+  pull(id)
+
+## all variables from table 1 and table 2
+variables_imp <- c("kjonn", "final_result_cat3_serr", "age_invitation", "senter", "Nasj_cat2", "Tarmkreft_Familie", "Sivilstatus_cat2", "Utdanning", "Arbeid_lump", "bowel_disorder2", "smoking2", "Snus", 
+                   "Energi_kcal", "BMI", "PhysAct_Score", "Antibiotics", "wcrf_index_main")
+
+## look at how many are missing
+metadata %>% 
+  dplyr::select(variables_imp) %>%
+  summary()
+
+## setting the ones with low quality FFQs to NA for alcohol and energy
+metadata <- metadata %>%
+  mutate(Alko = if_else(id %in% exclude, NA_real_, Alko),
+         Energi_kcal = if_else(id %in% exclude, NA_real_, Energi_kcal))
+#first, create a new data set 
+
+## imputing also the ones with poor FFQ quality
+metadata_imp <- metadata %>% 
+  rownames_to_column("sample_id") %>% 
+  dplyr::select("sample_id", variables_imp)  
+
+#Imputation
+init = mice(metadata_imp, maxit=5) #maxit is default 5, rarely necessary to do more according to doc but increasing it to 10
+predM = init$predictorMatrix
+
+## check if methods looks right for all the variables to be imputed
+init$method
+
+#vars not used as predictors 
+predM[, c("sample_id")]=0
+
+# multiple (m=5) imputation.
+set.seed(1234)
+metadata_imp = mice(metadata_imp, predictorMatrix=predM, m=5)
+metadata_imp <- complete(metadata_imp)
+
+#Check for missings in the imputed dataset.
+metadata %>% 
+  dplyr::select(variables_imp) %>% #include the columns with miss values only
+  summary()
+
+metadata_imp <- metadata_imp %>% left_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(-c(variables_imp)), by="sample_id") %>% 
+  column_to_rownames("sample_id")
+
+table(is.na(metadata))
+table(is.na(metadata_imp))
+
+## making same order
+ids_extracted <- intersect(rownames(metaphlan), rownames(metadata_imp))
+metaphlan <- metaphlan[ids_extracted, ]
+geneo <- geneo[ids_extracted, ]
+metadata_imp <- metadata_imp[ids_extracted, ]
+all(rownames(metaphlan) == rownames(metadata_imp))
+all(rownames(geneo) == rownames(metadata_imp))
+## subsetting for stratified analyses
+metadata_imp_cont <- metadata_imp %>% filter(final_result_cat3_serr == "No adenoma")
+metaphlan_controls <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_imp_cont %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+geneo_controls <- geneo %>% rownames_to_column("sample_id") %>% inner_join(metadata_imp_cont %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_controls) == rownames(metadata_imp_cont))
+all(rownames(geneo_controls) == rownames(metadata_imp_cont))
+
+metadata_imp_women <- metadata_imp %>% filter(kjonn == "Female")
+metaphlan_women <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_imp_women %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+geneo_women <- geneo %>% rownames_to_column("sample_id") %>% inner_join(metadata_imp_women %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_women) == rownames(metadata_imp_women))
+all(rownames(geneo_women) == rownames(metadata_imp_women))
+
+metadata_imp_men <- metadata_imp %>% filter(kjonn == "Male")
+metaphlan_men <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_imp_men %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+geneo_men <- geneo %>% rownames_to_column("sample_id") %>% inner_join(metadata_imp_men %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_men) == rownames(metadata_imp_men))
+all(rownames(geneo_men) == rownames(metadata_imp_men))
+
+####################
+
+## Epidemiology part 
+####################
+
+formulas <- list(final_result_cat3_serr ~ kjonn, 
+                 final_result_cat3_serr ~ kjonn + scale(age_invitation) + senter,
+                 final_result_cat3_serr ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump,
+                 final_result_cat3_serr ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated,
+                 final_result_cat3_serr ~ kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko))
+
+# Corresponding labels for each model
+labels_list <- list(list(kjonn ~ "Sex"), 
+                    list(kjonn ~ "Sex", senter ~ "Screening center"),
+                    list(kjonn ~ "Sex", `scale(age_invitation)` ~ "Age", senter ~ "Screening center", smoking2 ~ "Smoking", `scale(wcrf_index_main)` ~ "WCRF score", Sivilstatus_cat2 ~ "Marital status", Arbeid_lump ~ "Employment status"),
+                    list(kjonn ~ "Sex", `scale(age_invitation)` ~ "Age", senter ~ "Screening center", smoking2 ~ "Smoking", `scale(wcrf_index_main)` ~ "WCRF score", Sivilstatus_cat2 ~ "Marital status", Arbeid_lump ~ "Employment status", advanced_serrated ~ "Advanced serrated"),
+                    list(kjonn ~ "Sex", `scale(age_invitation)` ~ "Age", senter ~ "Screening center", smoking2 ~ "Smoking", Sivilstatus_cat2 ~ "Marital status", bowel_disorder2 ~"Bowel Disorder", Arbeid_lump ~ "Employment status", Utdanning ~ "Education", `scale(BMI)` ~ "BMI", `scale(Energi_kcal)` ~ "Energy kcal", `scale(Alko)` ~ "Alko"))
+# imputed dataset
+# List to store models
+models <- list()
+
+# Loop through the formulas but only include sex as output
+for (i in seq_along(formulas)) {
+  models[[i]] <- multinom(formulas[[i]], data = metadata_imp) %>%
+    tbl_regression(include = "kjonn", exponentiate = T) %>%
+    bold_p(t = 0.05) %>%
+    italicize_levels()
+}
+
+# Stack and save the models
+stacked_mod <- tbl_stack(models, group_header = c("Model 1: univariate", "Model 2: multivariate", "Model 3: multivariate", "Model 3B: multivariate", "Model 4: multivariate")) %>%
+  as_flex_table() %>%
+  save_as_docx(path="tables_and_figures/multinom_sex_imp.docx")
+
+
+####################
+## test 1
+####################
+
+## Diversity and composition -----------
+## 1. With sex as outcome
+## creating boxplots with sex as outcome, for the control groups and the population as a whole
+alpha_plot_sex <- lapply(c("metadata_controls", "metadata"), function(dataset) { 
+  if (dataset == "metadata_controls") tmp_dataset <- metadata_controls
+  if (dataset == "metadata") tmp_dataset <- metadata
+  
+  p <- tmp_dataset %>% 
+    dplyr::select(c(shannon, invsimpson, final_result_cat3_serr, kjonn)) %>% 
+    pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
+    mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
+    violin_box(y="value", ylab="", x="kjonn", xlab="", color="kjonn", fill="kjonn") +
+    facet_wrap(~ alpha, scales="free") 
+  
+  ggsave(filename = paste0("tables_and_figures/pdf/", dataset, "_alpha_sex.pdf"), plot = p)
+})
+
+
+# Loop through the formulas but only include sex as output in the table
+anova_test_sex_cont <- lapply(c("metadata_imp_cont", "metadata_controls"), function(dataset) { 
+  if (dataset == "metadata_imp_cont") tmp_dataset <- metadata_imp_cont
+  if (dataset == "metadata_controls") tmp_dataset <- metadata_controls
+  
+  lapply(c("model1", "model2", "model3", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ kjonn")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model4") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    lapply(c("richness", "shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+# Loop through the formulas but only include sex as output in the table
+anova_test_sex <- lapply(c("metadata_imp", "metadata"), function(dataset) { 
+  if (dataset == "metadata_imp") tmp_dataset <- metadata_imp
+  if (dataset == "metadata") tmp_dataset <- metadata
+  
+  lapply(c("model1", "model2", "model3", "model3B", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ kjonn")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model3B") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated")
+    if (model == "model4") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    lapply(c("richness", "shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+## 2. Stratified on sex and population as a whole?
+## making alpha diversity boxplots
+alpha_plot_finc <- lapply(c("metadata_women", "metadata_men"), function(dataset) { 
+  if (dataset == "metadata_women") tmp_dataset <- metadata_women
+  if (dataset == "metadata_men") tmp_dataset <- metadata_men
+  
+  
+  p <- tmp_dataset %>% 
+    dplyr::select(shannon, invsimpson, final_result_cat3_serr) %>% 
+    pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
+    mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
+    violin_box(y="value", ylab="", x="final_result_cat3_serr", xlab = "", color="final_result_cat3_serr", fill="final_result_cat3_serr") +
+    facet_wrap(~ alpha, scales="free") 
+  
+  ggsave(filename = paste0("tables_and_figures/pdf/", dataset, "_alpha_finc.pdf"), plot = p)
+})
+
+
+anova_test_finc_strat <- lapply(c("metadata_men", "metadata_women", "metadata_imp_men", "metadata_imp_women"), function(dataset) { 
+  if (dataset == "metadata_men") tmp_dataset <- metadata_men
+  if (dataset == "metadata_women") tmp_dataset <- metadata_women
+  if (dataset == "metadata_imp_men") tmp_dataset <- metadata_imp_men
+  if (dataset == "metadata_imp_women") tmp_dataset <- metadata_imp_women
+  
+  lapply(c("model1", "model2", "model3", "model3B", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model3B") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated")
+    if (model == "model4") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    
+    lapply(c("richness", "shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+anova_test_finc <- lapply(c("metadata", "metadata_imp"), function(dataset) { 
+  if (dataset == "metadata") tmp_dataset <- metadata
+  if (dataset == "metadata_imp") tmp_dataset <- metadata_imp
+  
+  lapply(c("model1", "model2", "model3", "model3B", "model4", "model5"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model3B") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated")
+    if (model == "model4") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    if (model == "model5") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    
+    
+    lapply(c("richness", "shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+write_tsv(anova_test_finc, "tables_and_figures/alpha_anova_interaction.tsv")
+
+## stratified on colonoscopy findings and differences by sex
+anova_test_finc_sex <- lapply(c("metadata_na", "metadata_naa", "metadata_al"), function(dataset) { 
+  if (dataset == "metadata_na") tmp_dataset <- metadata_imp %>% filter(final_result_cat3_serr == "No adenoma")
+  if (dataset == "metadata_naa") tmp_dataset <- metadata_imp %>% filter(final_result_cat3_serr == "Non-advanced adenoma")
+  if (dataset == "metadata_al") tmp_dataset <- metadata_imp %>% filter(final_result_cat3_serr == "Advanced lesion")
+  
+  lapply(c("model1", "model2", "model3", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ kjonn")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model4") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    lapply(c("richness", "shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+
+anova_test_finc %>% rbind(anova_test_finc_strat) %>% filter(Effect == "final_result_cat3_serr") %>% 
+  rbind(anova_test_sex %>% filter(Effect  == "kjonn")) %>% 
+  rbind(anova_test_sex_cont %>% filter(Effect  == "kjonn")) %>% 
+  rbind(anova_test_finc_sex %>% filter(Effect  == "kjonn")) %>% 
+  write_tsv("tables_and_figures/alpha_anova.tsv")
+
+metadata %>% group_by(kjonn, final_result_cat3_serr) %>% 
+  summarise(mean_sh = mean(shannon),
+            mean_inv = mean(invsimpson),
+            mean_rich = mean(richness))
+
+## beta diversity
+# permanova
+# cannot deal with missing data so only using the imputed metadata dataset
+
+beta_results_sex <- lapply(c("metaphlan_controls", "metaphlan"), function(dataset) { 
+  if (dataset == "metaphlan_controls") tmp_dataset <- metaphlan_controls 
+  if (dataset == "metaphlan") tmp_dataset <- metaphlan
+  
+  if (dataset == "metaphlan_controls") tmp_metadata <- metadata_imp_cont
+  if (dataset == "metaphlan") tmp_metadata <- metadata_imp
+  
+  lapply(c("model1", "model2", "model3", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("adonis_in ~ kjonn")
+    if (model == "model2") tmp_mod <- as.formula("adonis_in ~ kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("adonis_in ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model4") tmp_mod <- as.formula("adonis_in ~ kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    ## performing permanova
+    set.seed(1234)
+    adonis_in <- tmp_dataset %>%
+      as.matrix() %>% 
+      vegan::vegdist(method= "bray") 
+    
+    set.seed(1234)
+    adonis_out <- vegan::adonis2(tmp_mod, by = "margin", data=tmp_metadata) %>% 
+      mutate(dataset = dataset, outcome = "sex", model = model) %>% 
+      rownames_to_column("variable")
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+beta_results_sex_serr <- lapply(c("metaphlan"), function(dataset) { 
+  if (dataset == "metaphlan") tmp_dataset <- metaphlan
+  
+  if (dataset == "metaphlan") tmp_metadata <- metadata_imp
+  
+  ## performing permanova
+  set.seed(1234)
+  adonis_in <- tmp_dataset %>%
+    as.matrix() %>% 
+    vegan::vegdist(method= "bray") 
+  
+  set.seed(1234)
+  adonis_out <- vegan::adonis2(adonis_in ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated, by = "margin", data=tmp_metadata) %>% 
+    mutate(dataset = dataset, outcome = "sex", model = "model3B") %>% 
+    rownames_to_column("variable")
+}) %>% 
+  bind_rows()
+
+
+## permanova
+beta_results_finc_strat <- lapply(c("metaphlan_women", "metaphlan_men"), function(dataset) { 
+  if (dataset == "metaphlan_women") tmp_dataset <- metaphlan_women
+  if (dataset == "metaphlan_men") tmp_dataset <- metaphlan_men
+  
+  if (dataset == "metaphlan_women") tmp_metadata <- metadata_imp_women
+  if (dataset == "metaphlan_men") tmp_metadata <- metadata_imp_men
+  
+  lapply(c("model1", "model2", "model3", "model3B", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model3B") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated")
+    if (model == "model4") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    ## performing permanova
+    set.seed(1234)
+    adonis_in <- tmp_dataset %>%
+      as.matrix() %>% 
+      vegan::vegdist(method= "bray") 
+    
+    set.seed(1234)
+    adonis_out <- vegan::adonis2(tmp_mod, by = "margin" , data=tmp_metadata) %>% 
+      mutate(dataset = dataset, outcome = "colonoscopy findings", model = model) %>% 
+      rownames_to_column("variable")
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+## permanova
+beta_results_finc <- lapply(c("metaphlan"), function(dataset) { 
+  if (dataset == "metaphlan") tmp_dataset <- metaphlan
+  
+  if (dataset == "metaphlan") tmp_metadata <- metadata_imp
+  
+  lapply(c("model1", "model2", "model3", "model5"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    #if (model == "model3B") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump + advanced_serrated")
+    #if (model == "model4") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    if (model == "model5") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr+kjonn + final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    
+    ## performing permanova
+    set.seed(1234)
+    adonis_in <- tmp_dataset %>%
+      as.matrix() %>% 
+      vegan::vegdist(method= "bray") 
+    
+    set.seed(1234)
+    adonis_out <- vegan::adonis2(tmp_mod, by = "margin" , data=tmp_metadata) %>% 
+      mutate(dataset = dataset, outcome = "colonoscopy findings", model = model) %>% 
+      rownames_to_column("variable")
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+write_tsv(beta_results_finc, "tables_and_figures/beta_interaction.tsv")
+## permanova
+beta_results_strat_finc_sex <- lapply(c("metaphlan_na", "metaphlan_naa", "metaphlan_al"), function(dataset) { 
+  if (dataset == "metaphlan_na") tmp_dataset <- metaphlan %>% rownames_to_column("sample_id") %>% right_join(metadata_imp %>% rownames_to_column("sample_id") %>% filter(final_result_cat3_serr == "No adenoma") %>% select(sample_id)) %>% column_to_rownames("sample_id")
+  if (dataset == "metaphlan_naa") tmp_dataset <- metaphlan %>% rownames_to_column("sample_id") %>% right_join(metadata_imp %>% rownames_to_column("sample_id") %>% filter(final_result_cat3_serr == "Non-advanced adenoma") %>% select(sample_id)) %>% column_to_rownames("sample_id")
+  if (dataset == "metaphlan_al") tmp_dataset <- metaphlan %>% rownames_to_column("sample_id") %>% right_join(metadata_imp %>% rownames_to_column("sample_id") %>% filter(final_result_cat3_serr == "Advanced lesion") %>% select(sample_id)) %>% column_to_rownames("sample_id")
+  
+  if (dataset == "metaphlan_na") tmp_metadata <- metadata_imp %>% filter(final_result_cat3_serr == "No adenoma")
+  if (dataset == "metaphlan_naa") tmp_metadata <- metadata_imp %>% filter(final_result_cat3_serr == "Non-advanced adenoma")
+  if (dataset == "metaphlan_al") tmp_metadata <- metadata_imp %>% filter(final_result_cat3_serr == "Advanced lesion")
+  
+  lapply(c("model1", "model2", "model3", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("adonis_in ~ kjonn")
+    if (model == "model2") tmp_mod <- as.formula("adonis_in ~ kjonn + age_invitation + senter")
+    if (model == "model3") tmp_mod <- as.formula("adonis_in ~ kjonn + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model4") tmp_mod <- as.formula("adonis_in ~ kjonn + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + BMI + Energi_kcal + Alko")
+    
+    
+    ## performing permanova
+    set.seed(1234)
+    adonis_in <- tmp_dataset %>%
+      as.matrix() %>% 
+      vegan::vegdist(method= "bray") 
+    
+    set.seed(1234)
+    adonis_out <- vegan::adonis2(tmp_mod, by = "margin" , data=tmp_metadata) %>% 
+      mutate(dataset = dataset, outcome = "sex_finc", model = model) %>% 
+      rownames_to_column("variable")
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+beta_results_sex %>% 
+  filter(variable == "kjonn") %>% 
+  rbind(beta_results_finc %>% filter(variable == "final_result_cat3_serr")) %>% 
+  rbind(beta_results_finc_strat %>% filter(variable == "final_result_cat3_serr")) %>% 
+  write_tsv("tables_and_figures/beta_div_results.tsv")
+
+
+## making pcoa plots
+beta_plot_sex <- lapply(c("metaphlan_controls", "metaphlan"), function(dataset) {
+  if (dataset == "metaphlan_controls") tmp_dataset <- metaphlan_controls 
+  if (dataset == "metaphlan") tmp_dataset <- metaphlan
+  
+  if (dataset == "metaphlan_controls") tmp_metadata <- metadata_controls
+  if (dataset == "metaphlan") tmp_metadata <- metadata 
+  
+  ## performing permanova and putting the results in the plot
+  adonis_in <- tmp_dataset %>%
+    as.matrix() %>% 
+    vegan::vegdist(method= "bray") 
+  
+  set.seed(1234)
+  adonis_out <- vegan::adonis2(adonis_in ~ sex, by = "margin" , data=tmp_metadata)
+  
+  set.seed(1234)
+  bray_dist <- tmp_dataset %>%
+    as.matrix() %>% 
+    vegan::vegdist(method= "bray") 
+  
+  p <- 
+    bray_dist %>% 
+    dist_to_PCoA(group_var = tmp_dataset %>% 
+                   rownames_to_column("sample_id") %>% 
+                   dplyr::select(sample_id) %>% 
+                   left_join(tmp_metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, sex)) %>% 
+                   pull(sex)) %>% 
+    plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+    scale_color_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")) +
+    scale_fill_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00"))
+  
+  ggsave(filename = paste0("tables_and_figures/pdf/", dataset, "_beta_sex.pdf"), plot = p, width=14, height=12, units="cm")
+})
+
+
+beta_plot_finc <- lapply(c("metaphlan", "metaphlan_women", "metaphlan_men"), function(dataset) { 
+  if (dataset == "metaphlan") tmp_dataset <- metaphlan
+  if (dataset == "metaphlan_women") tmp_dataset <- metaphlan_women
+  if (dataset == "metaphlan_men") tmp_dataset <- metaphlan_men
+  
+  if (dataset == "metaphlan") tmp_metadata <- metadata_imp
+  if (dataset == "metaphlan_women") tmp_metadata <- metadata_imp_women
+  if (dataset == "metaphlan_men") tmp_metadata <- metadata_imp_men
+  
+  ## performing permanova and putting the results in the plot
+  adonis_in <- tmp_dataset %>%
+    as.matrix() %>% 
+    vegan::vegdist(method= "bray") 
+  
+  set.seed(1234)
+  adonis_out <- vegan::adonis2(adonis_in ~ final_result_cat3, by = "margin" , data=tmp_metadata)
+  
+  set.seed(1234)
+  bray_dist <- tmp_dataset %>%
+    as.matrix() %>% 
+    vegan::vegdist(method= "bray") 
+  
+  p <- 
+    bray_dist %>% 
+    dist_to_PCoA(group_var = tmp_dataset %>% 
+                   rownames_to_column("sample_id") %>% 
+                   dplyr::select(sample_id) %>% 
+                   left_join(tmp_metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, final_result_cat3)) %>% 
+                   pull(final_result_cat3)) %>% 
+    plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2")
+  
+  ggsave(filename = paste0("tables_and_figures/pdf/", dataset, "_beta_finc.pdf"), plot = p)
+})
+
+beta_plot_finc_sex <- lapply(c("metaphlan_na", "metaphlan_naa", "metaphlan_al"), function(dataset) { 
+  if (dataset == "metaphlan_na") tmp_dataset <- metaphlan %>% rownames_to_column("sample_id") %>% right_join(metadata_imp %>% rownames_to_column("sample_id") %>% filter(final_result_cat3_serr == "No adenoma") %>% dplyr::select(sample_id)) %>% column_to_rownames("sample_id")
+  if (dataset == "metaphlan_naa") tmp_dataset <- metaphlan %>% rownames_to_column("sample_id") %>% right_join(metadata_imp %>% rownames_to_column("sample_id") %>% filter(final_result_cat3_serr == "Non-advanced adenoma") %>% dplyr::select(sample_id)) %>% column_to_rownames("sample_id")
+  if (dataset == "metaphlan_al") tmp_dataset <- metaphlan %>% rownames_to_column("sample_id") %>% right_join(metadata_imp %>% rownames_to_column("sample_id") %>% filter(final_result_cat3_serr == "Advanced lesion") %>% dplyr::select(sample_id)) %>% column_to_rownames("sample_id")
+  
+  if (dataset == "metaphlan_na") tmp_metadata <- metadata_imp %>% filter(final_result_cat3_serr == "No adenoma")
+  if (dataset == "metaphlan_naa") tmp_metadata <- metadata_imp %>% filter(final_result_cat3_serr == "Non-advanced adenoma")
+  if (dataset == "metaphlan_al") tmp_metadata <- metadata_imp %>% filter(final_result_cat3_serr == "Advanced lesion")
+  
+  ## performing permanova and putting the results in the plot
+  adonis_in <- tmp_dataset %>%
+    as.matrix() %>% 
+    vegan::vegdist(method= "bray") 
+  
+  set.seed(1234)
+  adonis_out <- vegan::adonis2(adonis_in ~ kjonn, by = "margin" , data=tmp_metadata)
+  
+  p <- 
+    adonis_in %>% 
+    dist_to_PCoA(group_var = tmp_dataset %>% 
+                   rownames_to_column("sample_id") %>% 
+                   dplyr::select(sample_id) %>% 
+                   left_join(tmp_metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, kjonn)) %>% 
+                   pull(kjonn)) %>% 
+    plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+    theme(text = element_text(color = "black", size=10))+
+    scale_color_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")) +
+    scale_fill_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00"))
+})
+
+plot_na <- beta_plot_finc_sex[[1]] + ggtitle("No adenoma")
+plot_naa <- beta_plot_finc_sex[[2]] + ggtitle("Non-advanced adenoma")
+plot_al <- beta_plot_finc_sex[[3]] + ggtitle("Advanced lesions")
+
+plot_finc <- ggarrange(plot_na, plot_naa, plot_al, ncol=3, labels= c("A", "B", "C"), common.legend = T, legend = "bottom", align = "hv")
+ggsave(plot = plot_finc, filename = "tables_and_figures/pdf/beta_div_finc_sex.pdf", width = 20, height = 10, unit = "cm")
+
+
+
+####################
+
+## Differential abundance
+####################
+
+diff_abund_sex <-
+  lapply(c("metaphlan_controls", "metaphlan_imp_cont", "metaphlan", "metaphlan_imp"), function(dataset) { 
+    if (dataset == "metaphlan_controls") tmp_abund <- metaphlan_controls
+    if (dataset == "metaphlan_imp_cont") tmp_abund <- metaphlan_controls
+    if (dataset == "metaphlan") tmp_abund <- metaphlan
+    if (dataset == "metaphlan_imp") tmp_abund <- metaphlan
+    
+    if (dataset == "metaphlan_controls") tmp_metadata <- metadata_controls
+    if (dataset == "metaphlan_imp_cont") tmp_metadata <- metadata_imp_cont
+    if (dataset == "metaphlan") tmp_metadata <- metadata
+    if (dataset == "metaphlan_imp") tmp_metadata <- metadata_imp
+    
+    if (!dataset %in% list.dirs("results_sex/", full.names = FALSE)) dir.create(paste0("results_sex/", dataset), recursive = TRUE)
+    
+    lapply(c("model1", "model2", "model3", "model4"), function(model) {
+      if (model == "model1") adj_mod <- "kjonn"
+      if (model == "model2") adj_mod <- "kjonn,age_invitation,senter"
+      if (model == "model3") adj_mod <- "kjonn,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump"
+      if (model == "model4") adj_mod <- "kjonn,age_invitation,senter,smoking2,Sivilstatus_cat2,Arbeid_lump,Utdanning,bowel_disorder2,BMI,Energi_kcal,Alko"
+      
+      tmp_maaslin <-
+        Maaslin2(
+          input_data = tmp_abund,
+          input_metadata = tmp_metadata,
+          min_prevalence = 0.1,
+          transform = "LOG",
+          normalization = "NONE",
+          analysis_method = "LM",
+          output = paste0("results_sex/", dataset, "/", adj_mod),
+          ## Add adjustment: Age + sex
+          fixed_effects = c(adj_mod),
+          reference = c("Arbeid_lump,Employed","Utdanning,Primary_school"),
+          plot_heatmap = FALSE,
+          plot_scatter = FALSE
+        )
+      tmp_maaslin$results %>% 
+        tibble() %>% 
+        mutate(model = model,
+               dataset = dataset)
+    }) %>% 
+      bind_rows()
+  }) %>% 
+  bind_rows()
+
+diff_abund_sex %>% filter(metadata=="kjonn", qval <0.05) %>% left_join(mp4_names %>% dplyr::select("species", "sgb"), by=c("feature"="sgb")) %>% 
+  write_tsv("tables_and_figures/diff_abund/results_sex.tsv")
+
+diff_abund_finc_strat <-
+  lapply(c("metaphlan_men", "metaphlan_imp_men", "metaphlan_women", "metaphlan_imp_women"), function(dataset) { 
+    if (dataset == "metaphlan_men") tmp_abund <- metaphlan_men
+    if (dataset == "metaphlan_imp_men") tmp_abund <- metaphlan_men
+    if (dataset == "metaphlan_women") tmp_abund <- metaphlan_women
+    if (dataset == "metaphlan_imp_women") tmp_abund <- metaphlan_women
+    
+    if (dataset == "metaphlan_men") tmp_metadata <- metadata_men
+    if (dataset == "metaphlan_imp_men") tmp_metadata <- metadata_imp_men
+    if (dataset == "metaphlan_women") tmp_metadata <- metadata_women
+    if (dataset == "metaphlan_imp_women") tmp_metadata <- metadata_imp_women
+    
+    if (!dataset %in% list.dirs("results_finc_strat/", full.names = FALSE)) dir.create(paste0("results_finc_strat/", dataset), recursive = TRUE)
+    
+    lapply(c("model1", "model2", "model3", "model4"), function(model) {
+      if (model == "model1") adj_mod <- "final_result_cat3_serr"
+      if (model == "model2") adj_mod <- "final_result_cat3_serr,age_invitation,senter"
+      if (model == "model3") adj_mod <- "final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump"
+      if (model == "model4") adj_mod <- "final_result_cat3_serr,age_invitation,senter,smoking2,Sivilstatus_cat2,Arbeid_lump,Utdanning,bowel_disorder2,BMI,Energi_kcal,Alko"
+      
+      tmp_maaslin <-
+        Maaslin2(
+          input_data = tmp_abund,
+          input_metadata = tmp_metadata,
+          min_prevalence = 0.1,
+          transform = "LOG",
+          normalization = "NONE",
+          analysis_method = "LM",
+          output = paste0("results_finc_strat/", dataset, "/", adj_mod),
+          ## Add adjustment: Age + sex
+          fixed_effects = c(adj_mod),
+          reference = c("final_result_cat3_serr,No adenoma","Arbeid_lump,Employed","Utdanning,Primary_school"),
+          plot_heatmap = FALSE,
+          plot_scatter = FALSE
+        )
+      tmp_maaslin$results %>% 
+        tibble() %>% 
+        mutate(model = model,
+               dataset = dataset)
+    }) %>% 
+      bind_rows()
+  }) %>% 
+  bind_rows()
+
+diff_abund_finc_strat %>% filter(metadata=="final_result_cat3_serr", pval <0.05) %>% left_join(mp4_names %>% dplyr::select("species", "sgb"), by=c("feature"="sgb")) %>% 
+  write_tsv("tables_and_figures/diff_abund/results_finc_strat.tsv")
+
+#####################
+
+###### differential abundance of GO and dotplot
+################################
+diff_abund_sex_geneo <-
+  lapply(c("geneo_controls", "geneo", "geneo_imp_cont", "geneo_imp"), function(dataset) { 
+    if (dataset == "geneo_controls") tmp_abund <- geneo_controls
+    if (dataset == "geneo") tmp_abund <- geneo
+    if (dataset == "geneo_imp_cont") tmp_abund <- geneo_controls
+    if (dataset == "geneo_imp") tmp_abund <- geneo
+    
+    if (dataset == "geneo_controls") tmp_metadata <- metadata_controls
+    if (dataset == "geneo") tmp_metadata <- metadata
+    if (dataset == "geneo_imp_cont") tmp_metadata <- metadata_imp_cont
+    if (dataset == "geneo_imp") tmp_metadata <- metadata_imp
+    
+    if (!dataset %in% list.dirs("results_sex_geneo/", full.names = FALSE)) dir.create(paste0("results_sex_geneo/", dataset), recursive = TRUE)
+    
+    lapply(c("model1", "model2", "model3", "model4"), function(model) {
+      if (model == "model1") adj_mod <- "kjonn"
+      if (model == "model2") adj_mod <- "kjonn,age_invitation,senter"
+      if (model == "model3") adj_mod <- "kjonn,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump"
+      if (model == "model4") adj_mod <- "kjonn,age_invitation,senter,smoking2,Sivilstatus_cat2,Arbeid_lump,Utdanning,bowel_disorder2,BMI,Energi_kcal,Alko"
+      
+      tmp_maaslin <-
+        Maaslin2(
+          input_data = tmp_abund,
+          input_metadata = tmp_metadata,
+          min_prevalence = 0.1,
+          transform = "LOG",
+          normalization = "TSS",
+          analysis_method = "LM",
+          output = paste0("results_sex_geneo/", dataset, "/", adj_mod),
+          ## Add adjustment: Age + sex
+          fixed_effects = c(adj_mod),
+          reference = c("Arbeid_lump,Employed","Utdanning,Primary_school"),
+          plot_heatmap = FALSE,
+          plot_scatter = FALSE
+        )
+      tmp_maaslin$results %>% 
+        tibble() %>% 
+        mutate(model = model,
+               dataset = dataset)
+    }) %>% 
+      bind_rows()
+  }) %>% 
+  bind_rows()
+
+diff_abund_sex_geneo %>% filter(metadata=="kjonn", qval <0.05) %>%
+  write_tsv("tables_and_figures/diff_abund/results_sex_geneo.tsv")
+
+
+diff_abund_finc_strat_geneo <-
+  lapply(c("geneo_men", "geneo_imp_men", "geneo_women", "geneo_imp_women"), function(dataset) { 
+    if (dataset == "geneo_men") tmp_abund <- geneo_men
+    if (dataset == "geneo_imp_men") tmp_abund <- geneo_men
+    if (dataset == "geneo_women") tmp_abund <- geneo_women
+    if (dataset == "geneo_imp_women") tmp_abund <- geneo_women
+    
+    if (dataset == "geneo_men") tmp_metadata <- metadata_men
+    if (dataset == "geneo_imp_men") tmp_metadata <- metadata_imp_men
+    if (dataset == "geneo_women") tmp_metadata <- metadata_women
+    if (dataset == "geneo_imp_women") tmp_metadata <- metadata_imp_women
+    
+    if (!dataset %in% list.dirs("results_finc_strat_geneo/", full.names = FALSE)) dir.create(paste0("results_finc_strat_geneo/", dataset), recursive = TRUE)
+    
+    lapply(c("model1", "model2", "model3", "model4"), function(model) {
+      if (model == "model1") adj_mod <- "final_result_cat3_serr"
+      if (model == "model2") adj_mod <- "final_result_cat3_serr,age_invitation,senter"
+      if (model == "model3") adj_mod <- "final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump"
+      if (model == "model4") adj_mod <- "final_result_cat3_serr,age_invitation,senter,smoking2,Sivilstatus_cat2,Arbeid_lump,Utdanning,bowel_disorder2,BMI,Energi_kcal,Alko"
+      
+      tmp_maaslin <-
+        Maaslin2(
+          input_data = tmp_abund,
+          input_metadata = tmp_metadata,
+          min_prevalence = 0.1,
+          transform = "LOG",
+          normalization = "TSS",
+          analysis_method = "LM",
+          output = paste0("results_finc_strat_geneo/", dataset, "/", adj_mod),
+          ## Add adjustment: Age + sex
+          fixed_effects = c(adj_mod),
+          reference = c("final_result_cat3_serr,No adenoma","Arbeid_lump,Employed","Utdanning,Primary_school"),
+          plot_heatmap = FALSE,
+          plot_scatter = FALSE
+        )
+      tmp_maaslin$results %>% 
+        tibble() %>% 
+        mutate(model = model,
+               dataset = dataset)
+    }) %>% 
+      bind_rows()
+  }) %>% 
+  bind_rows()
+
+diff_abund_finc_strat_geneo %>% filter(metadata=="final_result_cat3_serr", qval <0.2) %>%  
+  write_tsv("tables_and_figures/diff_abund/results_finc_strat_geneo.tsv")
+
+library(tidytext)
+(dotplot_sex_geneo_MF <- read.delim("tables_and_figures/diff_abund/results_sex_geneo.tsv") %>%  
+    filter(model == "model3" & dataset == "geneo_imp") %>% 
+    filter(qval < 0.05) %>% 
+    left_join(map_go_name) %>% 
+    filter(GO == "MF") %>% 
+    mutate(direction = ifelse(coef > 0, "Positive", "Negative")) %>% 
+    mutate(feature_long = paste(feature, pathway, sep=": ")) %>% 
+    mutate(pathway = str_remove(pathway, "\\[MF\\]")) %>% 
+    mutate(pathway = reorder(pathway, coef)) %>% 
+    #arrange(species) %>% 
+    ggplot() +
+    ylab("Log2FC") +
+    ggtitle("Molecular function") +
+    geom_point(aes(x=pathway, y=coef, color=direction), size=3) +
+    geom_linerange(aes(x=pathway, ymin = (coef-1.96*stderr), ymax = (coef+1.96*stderr)), color="#3C3C3C", position = position_dodge(width =0.5), linewidth=0.5) +
+    scale_color_manual(values=c("#0072B2", "#D55E00")) +
+    scale_x_discrete(labels = function(x) str_trunc(x, width = 65)) + ## truncates y axis
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+    theme_classic() +
+    theme(text=element_text(size=8),
+          legend.position = "none",
+          plot.title = element_text(size = 8, hjust=0.5),
+          axis.title.y = element_blank(),
+          axis.text.y = element_text(size = 8)) + 
+    #labs(y = "Differently abundant pathways", x = NULL , color = NULL, fill=NULL) +
+    coord_flip())
+
+(dotplot_sex_geneo_BP <- read.delim("tables_and_figures/diff_abund/results_sex_geneo.tsv") %>%  
+    filter(model == "model3" & dataset == "geneo_imp") %>% 
+    filter(qval < 0.05) %>% 
+    left_join(map_go_name) %>% 
+    filter(GO == "BP") %>% 
+    mutate(direction = ifelse(coef > 0, "Positive", "Negative")) %>% 
+    mutate(feature_long = paste(feature, pathway, sep=": ")) %>% 
+    mutate(pathway = str_remove(pathway, "\\[BP\\]")) %>% 
+    mutate(pathway = reorder(pathway, coef)) %>% 
+    #arrange(species) %>% 
+    ggplot() +
+    ylab("Log2FC") +
+    ggtitle("Biological processes") +
+    geom_point(aes(x=pathway, y=coef, color=direction), size=3) +
+    geom_linerange(aes(x=pathway, ymin = (coef-1.96*stderr), ymax = (coef+1.96*stderr)), color="#3C3C3C", position = position_dodge(width =0.5), linewidth=0.5) +
+    scale_color_manual(values=c("#0072B2", "#D55E00")) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+    theme_classic() +
+    theme(text=element_text(size=8),
+          legend.position = "none",
+          plot.title = element_text(size = 8, hjust=0.5),
+          axis.title.y = element_blank(),
+          axis.text.y = element_text(size = 8)) + 
+    #labs(y = "Differently abundant pathways", x = NULL , color = NULL, fill=NULL) +
+    coord_flip())
+
+(dotplot_sex_geneo_CC <- read.delim("tables_and_figures/diff_abund/results_sex_geneo.tsv") %>%  
+    filter(model == "model3" & dataset == "geneo_imp") %>% 
+    filter(qval < 0.05) %>% 
+    left_join(map_go_name) %>% 
+    filter(GO == "CC") %>% 
+    mutate(direction = ifelse(coef > 0, "Positive", "Negative")) %>% 
+    mutate(feature_long = paste(feature, pathway, sep=": ")) %>% 
+    mutate(pathway = str_remove(pathway, "\\[CC\\]")) %>% 
+    mutate(pathway = reorder(pathway, coef)) %>% 
+    #arrange(species) %>% 
+    ggplot() +
+    ylab("Log2FC") +
+    ggtitle("Cellular components") +
+    geom_point(aes(x=pathway, y=coef, color=direction), size=3) +
+    geom_linerange(aes(x=pathway, ymin = (coef-1.96*stderr), ymax = (coef+1.96*stderr)), color="#3C3C3C", position = position_dodge(width =0.5), linewidth=0.5) +
+    scale_color_manual(values=c("#0072B2", "#D55E00")) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+    theme_classic() +
+    theme(text=element_text(size=8),
+          legend.position = "none",
+          plot.title = element_text(size = 8, hjust=0.5),
+          axis.title.y = element_blank(),
+          axis.text.y = element_text(size = 8)) + 
+    #labs(y = "Differently abundant pathways", x = NULL , color = NULL, fill=NULL) +
+    coord_flip())
+
+figs <- ggarrange(dotplot_sex_geneo_BP, dotplot_sex_geneo_CC, ncol = 1, labels = c("B", "C"), heights = c(1, 0.2), align = "v")
+ggsave(figs, filename = "tables_and_figures/pdf/figureS1_BP_CC.pdf", width = 14, height = 20, unit="cm")
+ggsave(dotplot_sex_geneo_MF, filename = "tables_and_figures/pdf/figureS1_MF.pdf", width = 16, height = 20, unit="cm")
+
+figureS1 <- ggarrange(dotplot_sex_geneo_MF, figs, labels= c("A", ""), align = "h")
+ggsave(figureS1, filename = "tables_and_figures/pdf/figureS1.pdf", width = 30, height = 20, unit="cm")
+
+
+################################
+
+## making diversity plots
+###########################################
+
+## alpha diversity
+#sex
+
+(p <- metadata %>% 
+   dplyr::select(shannon, invsimpson, kjonn) %>% 
+   pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
+   mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
+   ggplot(aes(y=value, x=kjonn, color = kjonn, fill=kjonn)) +
+   geom_boxplot(alpha = 0.4) +
+   xlab("") +
+   ylab("") + 
+   facet_wrap(~ alpha, scales="free") +
+   theme(text = element_text(color = "black", size=10))+
+   theme_bw() +
+   #theme(legend.position = "none") +
+   scale_fill_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")) +
+   scale_color_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")))
+
+ggsave(plot = p, filename = "tables_and_figures/pdf/alpha_div_sex.pdf", width = 16, height = 12, unit = "cm")
+
+
+## final_Result_cat3 as outcome stratified on sex
+(p1 <- metadata %>% 
+    dplyr::select(shannon, invsimpson, final_result_cat3_serr, kjonn) %>% 
+    mutate(final_result_cat3_serr = case_when(
+      final_result_cat3_serr == "No adenoma" ~ "neg",
+      final_result_cat3_serr == "Non-advanced adenoma" ~ "naa",
+      final_result_cat3_serr == "Advanced lesion" ~ "al")) %>% 
+    mutate(final_result_cat3_serr = factor(final_result_cat3_serr, levels = c("neg", "naa", "al"))) %>% 
+    pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
+    mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
+    ggplot(aes(y=value, x=final_result_cat3_serr, color = kjonn, fill=kjonn)) +
+    geom_boxplot(alpha = 0.4) +
+    xlab("") +
+    ylab("") + 
+    facet_wrap(~ alpha, scales="free") +
+    theme(text = element_text(color = "black", size=10))+
+    theme_bw() +
+    #theme(legend.position = "none") +
+    scale_fill_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")) +
+    scale_color_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")))
+
+# no legend for panels
+p1_noleg <- p1 + theme(legend.position = "none")
+
+ggsave(plot = p1, filename = "tables_and_figures/pdf/alpha_div_finc_sex.pdf", width = 16, height = 12, unit = "cm")
+
+
+(p1B <- metadata %>% 
+    dplyr::select(shannon, invsimpson, final_result_cat3_serr, kjonn) %>% 
+    mutate(final_result_cat3_serr = case_when(
+      final_result_cat3_serr == "No adenoma" ~ "neg",
+      final_result_cat3_serr == "Non-advanced adenoma" ~ "naa",
+      final_result_cat3_serr == "Advanced lesion" ~ "al")) %>% 
+    mutate(final_result_cat3_serr = factor(final_result_cat3_serr, levels = c("neg", "naa", "al"))) %>% 
+    pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
+    mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
+    ggplot(aes(y=value, x=kjonn, color = final_result_cat3_serr, fill=final_result_cat3_serr)) +
+    geom_boxplot(alpha = 0.4) +
+    xlab("") +
+    ylab("") + 
+    facet_wrap(~ alpha, scales="free") +
+    theme(text = element_text(color = "black", size=10))+
+    theme_bw() +
+    #theme(legend.position = "none") +
+    scale_fill_manual(values = c("neg" = "#FFD55C", "naa" = "#006D73", "al" = "#56B4E9")) +
+    scale_color_manual(values = c("neg" = "#FFD55C", "naa" = "#006D73", "al" = "#56B4E9")))
+
+# no legend for panels
+p1B_noleg <- p1B + theme(legend.position = "none")
+
+ggsave(plot = p1B, filename = "tables_and_figures/pdf/alpha_div_sex_finc.pdf", width = 16, height = 12, unit = "cm")
+
+## beta diversity
+set.seed(1234)
+bray_dist_sex <- metaphlan %>%
+  as.matrix() %>% 
+  vegan::vegdist(method= "bray") 
+
+p2 <- 
+  bray_dist_sex %>% 
+  dist_to_PCoA(group_var = metaphlan %>% 
+                 rownames_to_column("sample_id") %>% 
+                 dplyr::select(sample_id) %>% 
+                 left_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, kjonn)) %>% 
+                 pull(kjonn)) %>% 
+  plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+  theme(text = element_text(color = "black", size=8))+
+  scale_color_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00")) +
+  scale_fill_manual(values = c("Female" = "#0072B2", "Male" = "#D55E00"))
+
+set.seed(1234)
+bray_dist_men <- metaphlan_men %>%
+  as.matrix() %>% 
+  vegan::vegdist(method= "bray") 
+
+p3 <- 
+  bray_dist_men %>% 
+  dist_to_PCoA(group_var = metaphlan_men %>% 
+                 rownames_to_column("sample_id") %>% 
+                 dplyr::select(sample_id) %>% 
+                 left_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, final_result_cat3_serr)) %>% 
+                 pull(final_result_cat3_serr)) %>% 
+  plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+  ggtitle("Men") + 
+  theme(text = element_text(color = "black", size=8))+
+  scale_color_manual(values = c("No adenoma" = "#F0E442", "Non-advanced adenoma" = "#009E73", "Advanced lesion" = "#56B4E9"))+
+  scale_fill_manual(values = c("No adenoma" = "#F0E442", "Non-advanced adenoma" = "#009E73", "Advanced lesion" = "#56B4E9"))+
+  theme(legend.position = "none")
+
+
+set.seed(1234)
+bray_dist_women <- metaphlan_women %>%
+  as.matrix() %>% 
+  vegan::vegdist(method= "bray") 
+p4 <- 
+  bray_dist_women %>% 
+  dist_to_PCoA(group_var = metaphlan_women %>% 
+                 rownames_to_column("sample_id") %>% 
+                 dplyr::select(sample_id) %>% 
+                 left_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, final_result_cat3_serr)) %>% 
+                 pull(final_result_cat3_serr)) %>% 
+  plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+  ggtitle("Women") + 
+  theme(text = element_text(color = "black", size=8))+
+  scale_color_manual(values = c("No adenoma" = "#F0E442", "Non-advanced adenoma" = "#009E73", "Advanced lesion" = "#56B4E9"))+
+  scale_fill_manual(values = c("No adenoma" = "#F0E442", "Non-advanced adenoma" = "#009E73", "Advanced lesion" = "#56B4E9"))+
+  theme(legend.position = "none")
+#legend.text = element_text(size = 8))
+
+## run either p4 or p5 and remove the legend.position=none and then run the legend extract. then make p5 again without legend
+#leg <- p4 %>% get_legend() %>% as_ggplot()
+
+p5 <- ggarrange(p1_noleg, p2, labels = c("A", "B"), ncol = 2)
+#ggsave(plot = p5, filename = "tables_and_figures/pdf/alpha_div_all.pdf", width = 20, height = 8, unit = "cm")
+p6 <- ggarrange(p3, p4, leg, labels = c("C", "D", ""), ncol = 3, widths = c(0.975, 1, 0.4))
+#ggsave(plot = p6, filename = "tables_and_figures/pdf/beta_div_strat.pdf", width = 20, height = 8, unit = "cm")
+p7 <- ggarrange(p5, p6, ncol = 1)
+ggsave(plot = p7, filename = "tables_and_figures/pdf/all_div_plot.pdf", width = 20, height = 16, unit = "cm")
+
+p5b <- ggarrange(p1B_noleg, p2, labels = c("A", "B"), ncol = 2)
+p7b <- ggarrange(p5b, p6, ncol = 1)
+ggsave(plot = p7b, filename = "tables_and_figures/pdf/all_div_plot_b.pdf", width = 20, height = 16, unit = "cm")
+ggsave(plot = p3, filename = "tables_and_figures/pdf/beta_div_plot_men.pdf", width = 10, height = 10, unit = "cm")
+ggsave(plot = p4, filename = "tables_and_figures/pdf/beta_div_plot_women.pdf", width = 10, height = 10, unit = "cm")
+
+###########################################
+
+
+############################ microbial score------
+
+## getting the names from model 3 that is significnalty differtent between sex
+mic_score_names <- diff_abund_sex %>% filter(metadata == "kjonn" & dataset == "metaphlan_imp" & model == "model3" & qval <0.05) %>% pull(feature)
+mic_score_names_pos <- diff_abund_sex %>% filter(metadata == "kjonn" & dataset == "metaphlan_imp" & model == "model3" & qval <0.05 & coef >0) %>% pull(feature)
+mic_score_names_neg <- diff_abund_sex %>% filter(metadata == "kjonn" & dataset == "metaphlan_imp" & model == "model3" & qval <0.05 & coef <0) %>% pull(feature)
+
+#Create the microbial score (DAA between sex for whole population)
+# not sure i get it, from anes code it almost looks like she has done it overall? not for each sample? or does she have the dataframe in long format?
+mic_score <- metaphlan %>%
+  dplyr::select(all_of(mic_score_names)) %>% 
+  rownames_to_column("sample_id") %>% 
+  #simple (as in paper) - all bacteria 
+  rowwise() %>%
+  mutate(mic_score_t = sum(c_across(all_of(mic_score_names_pos)), na.rm = TRUE),
+         mic_score_n = sum(c_across(all_of(mic_score_names_neg)), na.rm = TRUE),
+         log_mic_score_t = sum(log1p(c_across(all_of(mic_score_names_pos))), na.rm = TRUE),
+         log_mic_score_n = sum(log1p(c_across(all_of(mic_score_names_neg))), na.rm = TRUE))%>%
+  ungroup() %>%  
+  mutate(mic_score_t = ifelse(mic_score_t == 0, {min_val_half <- min(mic_score_t[mic_score_t > 0]) / 2; min_val_half}, mic_score_t), ## why not do it for the t
+         mic_score_n = ifelse(mic_score_n == 0, {min_val_half <- min(mic_score_n[mic_score_n > 0]) / 2; min_val_half}, mic_score_n),
+         log_mic_score_t = ifelse(log_mic_score_t == 0, {min_val_half <- min(log_mic_score_t[log_mic_score_t > 0]) / 2; min_val_half}, log_mic_score_t),
+         log_mic_score_n = ifelse(log_mic_score_n == 0, {min_val_half <- min(log_mic_score_n[log_mic_score_n > 0]) / 2; min_val_half}, log_mic_score_n)) %>% 
+  mutate(mic_score=log(mic_score_t/mic_score_n), 
+         log_mic_score=log(log_mic_score_t/log_mic_score_n))
+
+#Histograms - score as a whole 
+mic_score %>% 
+  dplyr::select(34:39) %>%
+  pivot_longer(cols=1:5, names_to = "variables", values_to = "value") %>% 
+  ggplot(aes(value)) + 
+  geom_histogram(binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3))) +
+  theme_classic() +
+  scale_fill_brewer() +
+  facet_wrap(~variables, scales = "free")
+
+
+#Desc stats - score as a whole
+mic_score %>% 
+  dplyr::select(34:39) %>%
+  skim() %>%  view()
+
+#Obs - very much weight given to the num!!
+#This also become clear from the plot below
+
+
+#Level of bacteria by direction of association (values used as is)
+
+metaphlan %>% 
+  dplyr::select(all_of(mic_score_names)) %>% 
+  pivot_longer(1:32,  names_to="variable", values_to="value") %>% 
+  mutate(dir = ifelse(variable %in% mic_score_names_pos, "Positive", "Negative")) %>% 
+  group_by(dir, variable) %>% 
+  summarize(median = signif(median(value, na.rm = TRUE), 3),
+            Q1 = signif(quantile(value, probs = 0.25, na.rm = TRUE), 3),
+            Q3 = signif(quantile(value, probs = 0.75, na.rm = TRUE), 3)) %>% 
+  as.data.frame() %>% 
+  dplyr::select(dir, variable, median, Q1, Q3) %>%
+  group_by(dir) %>%
+  mutate(variable_new = reorder(variable, median)) %>% 
+  arrange(variable_new) %>% 
+  ggplot(aes(x=fct_inorder(variable_new), y=median)) +
+  geom_errorbar(aes(ymin = Q1, ymax = Q3, color = dir), position = position_dodge(0.5), width = 0.3)+
+  geom_point(aes(color = dir), position = position_dodge(0.5)) +
+  coord_flip() +
+  xlab("") + ylab("") +
+  theme_classic() 
+
+## counting number of non-zeros for all bacteria
+metaphlan %>% dplyr::select(all_of(mic_score_names)) %>% t() %>% 
+  as.matrix() %>% as.data.frame() %>% 
+  rownames_to_column("sgb") %>% 
+  rowwise() %>%
+  mutate(above_zero = sum(c_across(2:1035) > 0)) %>%
+  mutate(sum_total = sum(c_across(2:1035))) %>% 
+  mutate(log_sum_total = log(sum(c_across(2:1035)))) %>% 
+  ungroup() %>% 
+  dplyr::select(sgb, above_zero, sum_total, log_sum_total) %>% 
+  left_join(mp4_names %>% dplyr::select(c(species, sgb))) %>% 
+  view()
+
+sd(mic_score$mic_score)
+
+#Make percentiles of the score
+mic_score <- mic_score %>%
+  mutate(mic_score_tertile = cut(mic_score, breaks = quantile(mic_score, probs = c(0, 0.3333, 0.66666, 1)), include.lowest = TRUE, labels = c("1", "2", "3")), 
+         mic_score_median = cut(mic_score, breaks = quantile(mic_score, probs = c(0, 0.5, 1)), include.lowest = TRUE, labels = c("1", "2")),
+         mic_score_SD = mic_score/2.686575) #Make per SD increase variable 
+
+hist(mic_score$mic_score)
+
+
+library(mediation)
+#Make a dataframe including controls and advnaced lesions only 
+mediation_df_dwl <- mic_score %>%
+  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
+  mutate(outcome = factor(detect_worthy_lesions, levels = c("negative", "positive")))
+
+mediation_df_na_al <- mic_score %>%
+  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
+  filter(final_result_cat3_serr != "Non-advanced adenoma") %>% 
+  mutate(outcome = factor(final_result_cat3_serr, levels = c("No adenoma", "Advanced lesion"))) %>% 
+  droplevels(.)
+
+mediation_df_na_naa <- mic_score %>%
+  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
+  filter(final_result_cat3_serr != "Advanced lesion") %>% 
+  mutate(outcome = factor(final_result_cat3_serr, levels = c("No adenoma", "Non-advanced adenoma"))) %>% 
+  droplevels(.)
+
+mediation_df_dwl %>% 
+  group_by(kjonn) %>% 
+  summarise(mean = mean(mic_score_SD))
+
+t.test(mic_score_SD ~ kjonn, data=mediation_df)
+
+## making a list of the datanames to be used in mediation analyses
+dataset_names <- c("mediation_df_dwl", "mediation_df_na_naa", "mediation_df_na_al")
+
+#Association analyses using the microbial score
+
+ass_mic_score_dwl <- glm(detect_worthy_lesions ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
+                         family = "binomial", data = mediation_df_dwl) %>%  
+  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(term == "mic_score_SD")
+
+ass_mic_score_naa <- glm(final_result_cat3_serr ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
+                         family = "binomial", data = mediation_df_na_naa) %>%  
+  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(term == "mic_score_SD")
+
+ass_mic_score_al <- glm(final_result_cat3_serr ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
+                        family = "binomial", data = mediation_df_na_al) %>%  
+  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(term == "mic_score_SD")
+
+ass_mic_score <- ass_mic_score_dwl %>% rbind(ass_mic_score_al) %>% rbind(ass_mic_score_naa)
+
+ass_mic_score_finc <- multinom(final_result_cat3_serr ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
+                               family = "binomial", data = mediation_df_dwl) %>%  
+  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(term == "mic_score_SD")
+
+
+## Mediation analyses 
+#Do a formal mediation analysis using the package mediation
+### doin it in a loop and the results have been checked manually in the development_leftover_script.R that it gives the same results
+## i cant seem to set scale(age_invitation) in the lm model but i dont think it matters? Ane
+## only one problem with the extract_mediation_summary function is that it reports 0.000 if the p-value is less than 0.001. not sure how to fix it
+dataset_names
+
+# Initialize a list to store results
+results_list <- list()
+
+for (tmp_dataset_name in dataset_names) {
+  # Get the actual dataset from the name
+  tmp_dataset <- get(tmp_dataset_name)
+  
+  # Fit the mediator model 
+  formula_mediator <- as.formula("mic_score_SD ~ kjonn + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump")
+  fit_mediator <- lm(formula_mediator, data=tmp_dataset)
+  print(summary(fit_mediator))
+  
+  # Fit the dependent variable model
+  formula_dv <- as.formula("outcome ~ kjonn + mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump")
+  fit_dv <- glm(formula_dv, data=tmp_dataset, family = binomial)
+  print(summary(fit_dv))
+  
+  # Mediation analysis
+  set.seed(1234)
+  results <- mediate(fit_mediator, fit_dv, treat = 'kjonn', mediator = 'mic_score_SD', boot = TRUE, sims = 1000)
+  
+  # Process and store results
+  mediation_data_frame <- as.data.frame(extract_mediation_summary(summary(results))) %>% 
+    mutate(dataset = tmp_dataset_name)
+  results_list[[tmp_dataset_name]] <- mediation_data_frame 
+}
+
+# Combine all results into a single DataFrame
+all_results <- do.call(rbind, results_list) %>% 
+  rownames_to_column("term") %>% 
+  filter(str_detect(term, fixed("(average)")) | str_detect(term, fixed("Total"))) %>% 
+  write_tsv("tables_and_figures/mediation_analyses_results.tsv")
+
+all_results_all <- do.call(rbind, results_list) %>% 
+  rownames_to_column("term") %>% 
+  write_tsv("tables_and_figures/mediation_analyses_all_results.tsv")
+
+## mediate function with all bacteria
+####################
+# List of bacteria names as the independent variables
+mic_score_names
+
+mediation_df_log <- mediation_df_dwl %>% 
+  mutate(across(all_of(mic_score_names), LOG))
+
+# Initialize a list to store results
+results_list_taxa <- list()
+
+for (tmp_taxa in mic_score_names) {
+  # Fit the mediator model using dynamic column names
+  formula_mediator <- as.formula(paste(tmp_taxa, "~ kjonn"))
+  fit_mediator <- lm(formula_mediator, mediation_df_log)
+  print(summary(fit_mediator))
+  
+  # Fit the dependent variable model
+  formula_dv <- as.formula(paste("detect_worthy_lesions ~ kjonn +", tmp_taxa))
+  fit_dv <- glm(formula_dv, mediation_df_log, family = binomial)
+  print(summary(fit_dv))
+  
+  # Mediation analysis
+  set.seed(1234)
+  results <- mediate(fit_mediator, fit_dv, treat = 'kjonn', mediator = tmp_taxa, boot = TRUE, sims = 1000)
+  
+  # Process and store results
+  mediation_data_frame <- as.data.frame(extract_mediation_summary(summary(results))) %>% 
+    mutate(taxa = tmp_taxa)
+  results_list_taxa[[tmp_taxa]] <- mediation_data_frame 
+}
+# Optionally, combine all results into a single DataFrame
+all_results_taxa <- do.call(rbind, results_list_taxa) %>% 
+  rownames_to_column("term") %>% 
+  mutate(padj = p.adjust(`p-value`, method="BH")) %>% 
+  left_join(mp4_names, by=c("taxa"="sgb")) %>% 
+  filter(str_detect(term, fixed("(average)")) | str_detect(term, fixed("Total"))) %>% 
+  write_tsv("tables_and_figures/mediation_analyses_taxa_results.tsv")
+
+## checking how much the wcrf index mediates
+fit.totaleffect_sex=glm(detect_worthy_lesions ~ kjonn + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump, data=mediation_df_dwl, family="binomial")
+summary(fit.totaleffect_sex)
+tidy(fit.totaleffect_sex, exponentiate = TRUE, conf.int = TRUE)
+
+fit.mediator_sex=lm(wcrf_index_main~kjonn + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump, 
+                    data=mediation_df_dwl)
+summary(fit.mediator_sex)
+tidy(fit.mediator_sex, exponentiate = TRUE, conf.int = TRUE)
+
+fit.outcome_sex=glm(detect_worthy_lesions~kjonn + wcrf_index_main + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump, 
+                    family=binomial, data=mediation_df_dwl)
+summary(fit.outcome_sex)
+tidy(fit.outcome_sex, exponentiate = TRUE, conf.int = TRUE)
+set.seed(1234)
+results_sex = mediate(fit.mediator_sex, fit.outcome_sex, treat="kjonn", mediator="wcrf_index_main", boot = TRUE, sims = 1000)
+summary(results_sex)
+extract_mediation_summary(summary(results_sex))
+
+
+####################### plot for DA
+#########################################
+
+diff_abund_res_sex <- read_tsv("analyses/kjonn_R/results_sex/metaphlan_imp/kjonn,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump/all_results.tsv", col_types = cols())
+diff_abund_res_finc_men <- read_tsv("analyses/kjonn_R/results_finc_strat/metaphlan_imp_men/final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump/all_results.tsv", col_types = cols())
+diff_abund_res_finc_women <- read_tsv("analyses/kjonn_R/results_finc_strat/metaphlan_imp_women/final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump/all_results.tsv", col_types = cols())
+
+sgb_names <- read_tsv("data/input_processed/mp4_sgb_names.tsv", col_types = cols())
+
+metaphlan_sgbs <- readRDS("analyses/data/input_processed/mp4_sgbs.Rds")
+
+sample_meta <- readRDS("analyses/data/input_processed/sample_meta.Rds")
+screening_data <- readRDS("analyses/data/input_processed/screening_data.Rds")
+
+significance_thr <- 0.2
+
+lab_func <- function(labs_in, names = "sgb", lab_out = "species", df = sgb_names) {
+  labs_in %>% 
+    enframe(value = names) %>% 
+    left_join(df, by = names) %>% 
+    dplyr::select(any_of(lab_out))
+}
+
+
+diff_abund_res_combined <-
+  diff_abund_res_finc_men %>% 
+  mutate(analysis = "strat_men") %>% 
+  bind_rows(diff_abund_res_finc_women %>% 
+              mutate(analysis = "strat_women")) %>% 
+  bind_rows(diff_abund_res_sex %>% 
+              mutate(analysis = "sex")) %>% 
+  filter(metadata %in% c("final_result_cat3_serr", "kjonn")) %>% 
+  group_by(feature) %>% 
+  filter(any(qval[ metadata %in% "final_result_cat3_serr" & value %in% "Advanced lesion"] < significance_thr)) %>% 
+  ungroup() %>% 
+  left_join(sgb_names %>% 
+              dplyr::select(feature = sgb, species), by = "feature") %>% 
+  mutate(feature = factor(feature, 
+                          levels = diff_abund_res_finc_women %>% 
+                            filter(metadata %in% "final_result_cat3_serr",
+                                   value %in% "Advanced lesion") %>% 
+                            arrange(coef) %>% 
+                            pull(feature) %>% 
+                            ## This sgb was filtered out from stratified analyses for men
+                            c("SGB1776")))
+
+da_features_details <-
+  metaphlan_sgbs %>% 
+  pivot_longer(-sample_id, names_to = "feature", values_to = "rel_abundance") %>% 
+  inner_join(diff_abund_res_combined %>% 
+               dplyr::select(feature) %>% 
+               distinct(), by = "feature") %>% 
+  mutate(feature = factor(feature, levels = levels(diff_abund_res_combined$feature))) %>% 
+  left_join(sample_meta %>% 
+              left_join(screening_data, by = "deltaker_id")) %>% 
+  group_by(feature) %>% 
+  nest() %>% 
+  mutate(summary_by_sex_and_findings = map(data, .f = function(.data) {
+    .data %>%
+      group_by(kjonn, final_result_cat3_serr) %>%
+      summarize(mean_rel_abundance = mean(rel_abundance),
+                sd_rel_abundance = sd(rel_abundance),
+                prevalence = sum(rel_abundance>0)/n(),
+                .groups = "drop")
+  })) %>% 
+  mutate(summary_by_sex = map(data, .f = function(.data) {
+    .data %>%
+      group_by(kjonn) %>%
+      summarize(mean_rel_abundance = mean(rel_abundance),
+                sd_rel_abundance = sd(rel_abundance),
+                prevalence = sum(rel_abundance>0)/n(),
+                .groups = "drop")
+  })) %>% 
+  dplyr::select(-data)
+
+
+da_plot_effect_sizes <-
+  diff_abund_res_combined %>% 
+  mutate(value = factor(value, levels = c("Non-advanced adenoma", "Advanced lesion"))) %>% 
+  filter(metadata %in% "final_result_cat3_serr",
+         value %in% "Advanced lesion") %>% 
+  mutate(q_sign = case_when(qval < 0.2 ~ "q < 0.2",
+                            pval < 0.05 ~ "p < 0.05",
+                            TRUE ~ "n.s.") %>% 
+           factor(levels = c("q < 0.2", "p < 0.05", "n.s."))) %>% 
+  # mutate(q_sign = case_when(qval < 0.05 ~ "< 0.05",
+  #                           qval < 0.1 ~ "< 0.1",
+  #                           qval < 0.2 ~ "< 0.2",
+  #                           TRUE ~ ">= 0.2") %>% 
+  #          factor(levels = c("< 0.05", "< 0.1", "< 0.2", ">= 0.2"))) %>% 
+  ggplot(aes(x = coef, xmin = (coef-1.96*stderr), xmax = (coef+1.96*stderr), y = feature)) +
+  
+  geom_point(aes(fill = q_sign), shape = 21, size = 3) +
+  
+  scale_shape_manual(values=c(21, 24, 21)) + 
+  scale_fill_manual(values=c("#56B4E9", "#0052B2", "white")) +
+  # scale_colour_manual(values=c("black", "black", "black")) +
+  
+  theme_classic() +
+  theme(axis.text.y = element_text(face="italic")) +
+  # theme(text=element_text(size=8)) +
+  labs(y = NULL, x = NULL , color = NULL, fill=NULL) +
+  
+  geom_linerange(position = position_dodge2(width = 0.6)) +
+  # scale_alpha_manual(values = seq(1,0.1, length.out=4)) +
+  geom_vline(xintercept = 0, color = "gray70", linetype = "dashed") +
+  scale_y_discrete(labels = lab_func) +
+  facet_wrap(~analysis + value, ncol = 2)
+
+
+
+da_plot_prevalence <-
+  diff_abund_res_combined %>% 
+  filter(str_detect(analysis, "strat")) %>% 
+  left_join(diff_abund_res_combined %>% 
+              filter(analysis %in% "sex") %>% 
+              mutate(analysis = case_when(coef > 0 ~ "strat_men",
+                                          coef < 0 ~ "strat_women")) %>% 
+              mutate(sex_diff = case_when(qval < 0.05 ~ "**",
+                                          pval < 0.05 ~ "*",
+                                          TRUE ~ "")) %>% 
+              dplyr::select(feature, analysis, sex_diff)) %>% 
+  mutate(sex_diff = ifelse(is.na(sex_diff), "", sex_diff)) %>%
+  mutate(prev = paste0(signif(N.not.0/N, 2), sex_diff)) %>% 
+  mutate(value = N.not.0/N) %>% 
+  ggplot(aes(fill = value, y = feature, x = analysis, label = prev)) +
+  scale_y_discrete(labels = lab_func) +
+  geom_tile() +
+  geom_text(size = 2) +
+  scale_fill_gradient2(limits = c(0,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+  labs(fill = "Prevalence", x = "", y = "")
+# geom_col(position = position_dodge())
+
+dot_prev <- cowplot::plot_grid(da_plot_effect_sizes, 
+                               da_plot_prevalence + 
+                                 theme(axis.text.y = element_blank(),
+                                       axis.ticks.y = element_blank()), 
+                               align = "h", axis = "bt", ncol = 2, rel_widths = c(1,.4))
+ggsave(dot_prev, filename = "tables_and_figures/pdf/dot_prev_blue.pdf", width = 22, height = 10, unit="cm")
+
+
+## testing the species in a linear regression model 
+species <- diff_abund_res_combined %>% pull(feature) %>% unique() %>% droplevels()
+
+covars <- ("age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump")
+
+df <- metaphlan %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, species) %>% 
+  left_join(metadata %>% rownames_to_column("sample_id"))
+
+multinom_species <- lapply(species, function(species) {
+  tmp <- df %>% 
+    dplyr::rename(tmp_taxa = all_of(species)) %>% 
+    multinom(final_result_cat3_serr ~ tmp_taxa*kjonn + tmp_taxa + kjonn + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
+             data = ., na.action = na.omit) %>% 
+    tidy() %>% 
+    mutate(feature = species) %>% 
+    filter(term != "(Intercept)")
+}) %>% 
+  bind_rows()
+
+tmp <- multinom_species %>% mutate(padj = p.adjust(p.value)) %>% 
+  filter(term == "tmp_taxa" | term == "kjonnMale" | term == "tmp_taxa:kjonnMale") 
+
+write_tsv(tmp, "diff_abund_species_multinom_results.tsv")
+
+
+###### doing the same for pathways
+diff_abund_res_sex_path <- read_tsv("analyses/kjonn_R/results_sex_paths/geneo_imp/kjonn,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump/all_results.tsv", col_types = cols())
+diff_abund_res_finc_men_path <- read_tsv("analyses/kjonn_R/results_finc_strat_paths/geneo_imp_men/final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump/all_results.tsv", col_types = cols())
+diff_abund_res_finc_women_path <- read_tsv("analyses/kjonn_R/results_finc_strat_paths/geneo_imp_women/final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump/all_results.tsv", col_types = cols())
+
+map_go_name <- read.delim("map_go_name.txt", header=FALSE) %>% 
+  dplyr::rename(feature = V1, pathway = V2) %>% 
+  mutate(feature = str_replace(feature, ":", ".")) %>% 
+  mutate(pathway = str_remove_all(pathway, "(using a glucosylated glycogenin as primer for glycogen synthesis)"))
+
+map_go_name <- map_go_name %>% mutate(pathway = str_remove_all(pathway, "biosynthetic process from peptidyl-aspartic acid")) %>% 
+  mutate(pathway_long = paste(feature, pathway, sep=": ")) 
+
+sample_meta <- readRDS("data/input_processed/sample_meta.Rds")
+screening_data <- readRDS("data/input_processed/screening_data.Rds")
+
+significance_thr <- 0.15
+
+lab_func <- function(labs_in, names = "feature", lab_out = "pathway_long", df = map_go_name) {
+  labs_in %>% 
+    enframe(value = names) %>% 
+    left_join(df, by = names) %>% 
+    dplyr::select(any_of(lab_out))
+}
+
+
+diff_abund_res_combined_path <-
+  diff_abund_res_finc_men_path %>% 
+  mutate(analysis = "strat_men") %>% 
+  bind_rows(diff_abund_res_finc_women_path %>% 
+              mutate(analysis = "strat_women")) %>% 
+  bind_rows(diff_abund_res_sex_path %>% 
+              mutate(analysis = "sex")) %>% 
+  filter(metadata %in% c("final_result_cat3_serr", "kjonn")) %>% 
+  group_by(feature) %>% 
+  filter(any(qval[ metadata %in% "final_result_cat3_serr" & value %in% "Advanced lesion"] < significance_thr)) %>% 
+  ungroup() %>% 
+  left_join(map_go_name %>% 
+              dplyr::select(feature, pathway)) %>% 
+  mutate(feature = factor(feature, 
+                          levels = diff_abund_res_finc_women_path %>% 
+                            filter(metadata %in% "final_result_cat3_serr",
+                                   value %in% "Advanced lesion") %>% 
+                            arrange(coef) %>% 
+                            pull(feature)))
+
+da_features_details_path <-
+  geneo %>% 
+  rownames_to_column("sample_id") %>% 
+  pivot_longer(-sample_id, names_to = "feature", values_to = "rel_abundance") %>% 
+  mutate(feature = str_replace(feature, ":", ".")) %>% 
+  inner_join(diff_abund_res_combined_path %>% 
+               dplyr::select(feature) %>% 
+               distinct(), by = "feature") %>% 
+  mutate(feature = factor(feature, levels = levels(diff_abund_res_combined_path$feature))) %>% 
+  left_join(sample_meta %>% 
+              left_join(screening_data, by = "deltaker_id")) %>% 
+  group_by(feature) %>% 
+  nest() %>% 
+  mutate(summary_by_sex_and_findings = map(data, .f = function(.data) {
+    .data %>%
+      group_by(kjonn, final_result_cat3_serr) %>%
+      summarize(mean_rel_abundance = mean(rel_abundance),
+                sd_rel_abundance = sd(rel_abundance),
+                prevalence = sum(rel_abundance>0)/n(),
+                .groups = "drop")
+  })) %>% 
+  mutate(summary_by_sex = map(data, .f = function(.data) {
+    .data %>%
+      group_by(kjonn) %>%
+      summarize(mean_rel_abundance = mean(rel_abundance),
+                sd_rel_abundance = sd(rel_abundance),
+                prevalence = sum(rel_abundance>0)/n(),
+                .groups = "drop")
+  })) %>% 
+  dplyr::select(-data)
+
+
+da_plot_effect_sizes <-
+  diff_abund_res_combined_path %>% 
+  mutate(pathway_long = paste(feature, pathway, sep=": ")) %>% 
+  #mutate(feature_long = reorder(feature_long, coef)) %>% 
+  mutate(value = factor(value, levels = c("Non-advanced adenoma", "Advanced lesion"))) %>%
+  filter(metadata %in% "final_result_cat3_serr",
+         value %in% "Advanced lesion") %>% 
+  mutate(q_sign = case_when(qval < 0.15 ~ "q < 0.15",
+                            pval < 0.05 ~ "p < 0.05",
+                            TRUE ~ "n.s.") %>% 
+           factor(levels = c("q < 0.15", "p < 0.05", "n.s."))) %>% 
+  # mutate(q_sign = case_when(qval < 0.05 ~ "< 0.05",
+  #                           qval < 0.1 ~ "< 0.1",
+  #                           qval < 0.2 ~ "< 0.2",
+  #                           TRUE ~ ">= 0.2") %>% 
+  #          factor(levels = c("< 0.05", "< 0.1", "< 0.2", ">= 0.2"))) %>% 
+  ggplot(aes(x = coef, xmin = (coef-1.96*stderr), xmax = (coef+1.96*stderr), y = feature)) +
+  
+  geom_point(aes(fill = q_sign), shape = 21, size = 3) +
+  
+  scale_shape_manual(values=c(21, 24, 21)) + 
+  scale_fill_manual(values=c("#56B4E9", "#0052B2", "white")) +
+  # scale_colour_manual(values=c("black", "black", "black")) +
+  
+  theme_classic() +
+  
+  # theme(text=element_text(size=8)) +
+  labs(y = NULL, x = NULL , color = NULL, fill=NULL) +
+  
+  geom_linerange(position = position_dodge2(width = 0.6)) +
+  # scale_alpha_manual(values = seq(1,0.1, length.out=4)) +
+  geom_vline(xintercept = 0, color = "gray70", linetype = "dashed") +
+  scale_y_discrete(labels = lab_func) +
+  facet_wrap(~analysis + value, ncol = 2)
+
+ggsave(da_plot_effect_sizes, filename = "tables_and_figures/pdf/dot_prev_path_eff_size.pdf", width = 24, height = 22, unit="cm")
+
+da_plot_prevalence <-
+  diff_abund_res_combined_path %>% 
+  filter(str_detect(analysis, "strat")) %>% 
+  left_join(diff_abund_res_combined_path %>% 
+              filter(analysis %in% "sex") %>% 
+              mutate(analysis = case_when(coef > 0 ~ "strat_men",
+                                          coef < 0 ~ "strat_women")) %>% 
+              mutate(sex_diff = case_when(qval < 0.05 ~ "**",
+                                          pval < 0.05 ~ "*",
+                                          TRUE ~ "")) %>% 
+              dplyr::select(feature, analysis, sex_diff)) %>% 
+  mutate(sex_diff = ifelse(is.na(sex_diff), "", sex_diff)) %>%
+  mutate(prev = paste0(signif(N.not.0/N, 2), sex_diff)) %>% 
+  mutate(value = N.not.0/N) %>% 
+  ggplot(aes(fill = value, y = feature, x = analysis, label = prev)) +
+  scale_y_discrete(labels = lab_func) +
+  geom_tile() +
+  geom_text(size = 2) +
+  scale_fill_gradient2(limits = c(0,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+  labs(fill = "Prevalence", x = "", y = "") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+ggsave(da_plot_prevalence, filename = "tables_and_figures/pdf/dot_prev_path_prev.pdf", width = 6, height = 22, unit="cm")
+
+# geom_col(position = position_dodge())
+dot_prev_path <- cowplot::plot_grid(da_plot_effect_sizes, 
+                                    da_plot_prevalence + 
+                                      theme(axis.text.y = element_blank(),
+                                            axis.ticks.y = element_blank()), 
+                                    align = "h", axis = "bt", ncol = 2, rel_widths = c(1,.25))
+ggsave(dot_prev_path, filename = "tables_and_figures/pdf/dot_prev_path.pdf", width = 25, height = 12, unit="cm")
+
+
+## testing the species in a linear regression model 
+species <- diff_abund_res_combined %>% pull(feature) %>% unique() %>% droplevels()
+
+df <- metaphlan %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, species) %>% 
+  left_join(metadata %>% rownames_to_column("sample_id"))
+
+multinom_species <- lapply(species, function(species) {
+  tmp <- df %>% 
+    dplyr::rename(tmp_taxa = all_of(species)) %>% 
+    multinom(final_result_cat3_serr ~ tmp_taxa*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, 
+             data = ., na.action = na.omit) %>% 
+    tidy() %>% 
+    mutate(feature = species) %>% 
+    filter(term != "(Intercept)")
+}) %>% 
+  bind_rows()
+
+
+## testing the pathways in a linear regression model 
+genes <- diff_abund_res_combined_path %>% mutate(feature = str_replace(feature, "GO.", "GO:")) %>% 
+  pull(feature) %>% unique() 
+
+df <- geneo %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, genes) %>% 
+  left_join(metadata %>% rownames_to_column("sample_id"))
+
+multinom_geneo <- lapply(genes, function(genes) {
+  tmp <- df %>% 
+    dplyr::rename(tmp_genes = all_of(genes)) %>% 
+    multinom(final_result_cat3_serr ~ tmp_genes*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, 
+             data = ., na.action = na.omit) %>% 
+    tidy() %>% 
+    mutate(feature = genes) %>% 
+    filter(term != "(Intercept)")
+}) %>% 
+  bind_rows()
+
+
+
+tmp <- multinom_geneo %>% mutate(padj = p.adjust(p.value)) %>% 
+  filter(term == "scale(tmp_genes)" | term == "kjonnMale" | term == "tmp_genes:kjonnMale") %>% 
+  left_join(map_go_name %>% dplyr::select(feature, pathway) %>% mutate(feature = str_replace(feature, "GO.", "GO:")))
+
+write_tsv(tmp, "tables_and_figures/diff_abund_paths_multinom_results_scaled_final.tsv")
+
+
+
+#####################################
+
+############################ serrated lesions subgroup analyses 
+#######################################
+## checking out serrated lesions
+
+## subsetting for advanced serrated and controls only
+
+metadata_serr <- metadata_imp %>% filter(final_result_cat3_serr == "No adenoma" | advanced_serrated == 1) %>% droplevels()
+metaphlan_serr <- metaphlan %>% rownames_to_column("sample_id") %>% inner_join(metadata_serr %>% rownames_to_column("sample_id")%>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_serr) == rownames(metadata_serr))
+
+metadata_women_serr <- metadata_serr %>% filter(kjonn == "Female")
+metaphlan_women_serr <- metaphlan_serr %>% rownames_to_column("sample_id") %>% inner_join(metadata_women_serr %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_women_serr) == rownames(metadata_women_serr))
+
+metadata_men_serr <- metadata_serr %>% filter(kjonn == "Male")
+metaphlan_men_serr <- metaphlan_serr %>% rownames_to_column("sample_id") %>% inner_join(metadata_men_serr %>% rownames_to_column("sample_id") %>% dplyr::select("sample_id")) %>% column_to_rownames("sample_id")
+all(rownames(metaphlan_men_serr) == rownames(metadata_men_serr))
+
+## alpha diversity, NO DIFFERENCE
+
+anova_test_sex_serr <- lapply(c("metadata_serr"), function(dataset) { 
+  if (dataset == "metadata_serr") tmp_dataset <- metadata_serr
+  
+  lapply(c("model1", "model2", "model3", "model4"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ kjonn")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    if (model == "model4") tmp_mod <- as.formula("tmp_vars ~ kjonn + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    lapply(c("shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+### significant in women for shannon diversity for all models tested, therefore, 
+### performing a sensitivity analyses to see if the difference is attributed to serrated only or the advanced lesion group as a whole
+
+anova_test_finc_strat_serr <- lapply(c("metadata_men_serr", "metadata_women_serr"), function(dataset) { 
+  if (dataset == "metadata_men_serr") tmp_dataset <- metadata_men_serr
+  if (dataset == "metadata_women_serr") tmp_dataset <- metadata_women_serr
+  
+  lapply(c("model1", "model2", "model3"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    
+    lapply(c("shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+aov(shannon ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, data = metadata_serr) %>% 
+  tidy()
+
+aov(invsimpson ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, data = metadata_serr) %>% 
+  tidy()
+
+(p <- metadata_serr %>% 
+    dplyr::select(shannon, invsimpson, final_result_cat3_serr, kjonn) %>% 
+    mutate(final_result_cat3_serr = case_when(
+      final_result_cat3_serr == "No adenoma" ~ "No adenoma",
+      final_result_cat3_serr == "Advanced lesion" ~ "Advanced serrated")) %>% 
+    mutate(Group = factor(final_result_cat3_serr, levels = c("No adenoma", "Advanced serrated"))) %>% 
+    pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
+    mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
+    ggplot(aes(y=value, x=kjonn, color = Group, fill=Group)) +
+    geom_boxplot(alpha = 0.4) +
+    xlab("") +
+    ylab("") + 
+    facet_wrap(~ alpha, scales="free") +
+    theme(text = element_text(color = "black", size=10))+
+    theme_bw() +
+    #theme(legend.position = "none") +
+    scale_fill_manual(values = c("No adenoma" = "#E69F00", "Advanced serrated" = "#5694E9")) +
+    scale_color_manual(values = c("No adenoma" = "#E69F00", "Advanced serrated" = "#5694E9")))
+
+## sensitivity analyses
+metadata_men_sens <- metadata_imp %>% filter(advanced_serrated != 1 & kjonn == "Male") %>% droplevels()
+metadata_women_sens <- metadata_imp %>% filter(advanced_serrated != 1 & kjonn == "Female") %>% droplevels()
+
+anova_test_finc_strat_sensitivity <- lapply(c("metadata_men_sens", "metadata_women_sens"), function(dataset) { 
+  if (dataset == "metadata_men_sens") tmp_dataset <- metadata_men_sens
+  if (dataset == "metadata_women_sens") tmp_dataset <- metadata_women_sens
+  
+  lapply(c("model1", "model2", "model3"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("tmp_vars ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    
+    lapply(c("shannon", "invsimpson"), function(vars) {
+      current_formula <- update(tmp_mod, as.formula(paste(vars, "~ .")))
+      
+      tmp <- tmp_dataset %>% dplyr::rename(tmp_vars = all_of(vars)) %>% 
+        aov(tmp_mod, data = .) %>% 
+        anova_summary() %>% as.data.frame() %>% 
+        mutate(dataset = dataset, alpha = vars, model = model)
+      
+    }) %>% 
+      bind_rows()
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+# beta diversity, only diff in women for model 1 (UNIVARIATE)
+
+beta_results_strat_serr <- lapply(c("metaphlan_women_serr", "metaphlan_men_serr"), function(dataset) { 
+  if (dataset == "metaphlan_women_serr") tmp_dataset <- metaphlan_women_serr
+  if (dataset == "metaphlan_men_serr") tmp_dataset <- metaphlan_men_serr
+  
+  if (dataset == "metaphlan_women_serr") tmp_metadata <- metadata_women_serr
+  if (dataset == "metaphlan_men_serr") tmp_metadata <- metadata_men_serr
+  
+  lapply(c("model1", "model2", "model3"), function(model) {
+    if (model == "model1") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr")
+    if (model == "model2") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter")
+    if (model == "model3") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump")
+    #if (model == "model4") tmp_mod <- as.formula("adonis_in ~ final_result_cat3_serr + scale(age_invitation) + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump + Utdanning + bowel_disorder2 + scale(BMI) + scale(Energi_kcal) + scale(Alko)")
+    
+    
+    ## performing permanova
+    set.seed(1234)
+    adonis_in <- tmp_dataset %>%
+      as.matrix() %>% 
+      vegan::vegdist(method= "bray") 
+    
+    set.seed(1234)
+    adonis_out <- vegan::adonis2(tmp_mod, by = "margin" , data=tmp_metadata) %>% 
+      mutate(dataset = dataset, outcome = "colonoscopy findings", model = model) %>% 
+      rownames_to_column("variable")
+  }) %>% 
+    bind_rows()
+}) %>% 
+  bind_rows()
+
+
+# differential abundance 
+
+diff_abund_finc_strat_serr <-
+  lapply(c("metaphlan_men_serr", "metaphlan_women_serr"), function(dataset) { 
+    if (dataset == "metaphlan_men_serr") tmp_abund <- metaphlan_men_serr
+    if (dataset == "metaphlan_women_serr") tmp_abund <- metaphlan_women_serr
+    
+    if (dataset == "metaphlan_men_serr") tmp_metadata <- metadata_men
+    if (dataset == "metaphlan_women_serr") tmp_metadata <- metadata_women
+    
+    if (!dataset %in% list.dirs("results_finc_strat_serr/", full.names = FALSE)) dir.create(paste0("results_finc_strat_serr/", dataset), recursive = TRUE)
+    
+    lapply(c("model1", "model2", "model3"), function(model) {
+      if (model == "model1") adj_mod <- "final_result_cat3_serr"
+      if (model == "model2") adj_mod <- "final_result_cat3_serr,age_invitation,senter"
+      if (model == "model3") adj_mod <- "final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump"
+      
+      tmp_maaslin <-
+        Maaslin2(
+          input_data = tmp_abund,
+          input_metadata = tmp_metadata,
+          min_prevalence = 0.1,
+          transform = "LOG",
+          normalization = "NONE",
+          analysis_method = "LM",
+          output = paste0("results_finc_strat_serr/", dataset, "/", adj_mod),
+          ## Add adjustment: Age + sex
+          fixed_effects = c(adj_mod),
+          reference = c("final_result_cat3_serr,No adenoma","Arbeid_lump,Employed","Utdanning,Primary_school"),
+          plot_heatmap = FALSE,
+          plot_scatter = FALSE
+        )
+      tmp_maaslin$results %>% 
+        tibble() %>% 
+        mutate(model = model,
+               dataset = dataset)
+    }) %>% 
+      bind_rows()
+  }) %>% 
+  bind_rows()
+
+set.seed(1234)
+bray_dist_men <- metaphlan_men_serr %>%
+  as.matrix() %>% 
+  vegan::vegdist(method= "bray") 
+
+p1 <- 
+  bray_dist_men %>% 
+  dist_to_PCoA(group_var = metaphlan_men_serr %>% 
+                 rownames_to_column("sample_id") %>% 
+                 dplyr::select(sample_id) %>% 
+                 left_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, final_result_cat3_serr)) %>% 
+                 pull(final_result_cat3_serr)) %>% 
+  plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+  ggtitle("Men") + 
+  theme(text = element_text(color = "black", size=8))+
+  scale_color_manual(values = c("No adenoma" = "#E69F00", "Advanced lesion" = "#5694E9"))+
+  scale_fill_manual(values = c("No adenoma" = "#E69F00", "Advanced lesion" = "#5694E9"))+
+  theme(legend.position = "none")
+
+
+set.seed(1234)
+bray_dist_women <- metaphlan_women_serr %>%
+  as.matrix() %>% 
+  vegan::vegdist(method= "bray") 
+p2 <- 
+  bray_dist_women %>% 
+  dist_to_PCoA(group_var = metaphlan_women_serr %>% 
+                 rownames_to_column("sample_id") %>% 
+                 dplyr::select(sample_id) %>% 
+                 left_join(metadata %>% rownames_to_column("sample_id") %>% dplyr::select(sample_id, final_result_cat3_serr)) %>% 
+                 pull(final_result_cat3_serr)) %>% 
+  plot_pcoa(dim_1 = "PCoA1", dim_2 = "PCoA2") +
+  ggtitle("Women") + 
+  theme(text = element_text(color = "black", size=8))+
+  scale_color_manual(values = c("No adenoma" = "#E69F00", "Advanced lesion" = "#5694E9"))+
+  scale_fill_manual(values = c("No adenoma" = "#E69F00", "Advanced lesion" = "#5694E9"))+
+  theme(legend.position = "none")
+#legend.text = element_text(size = 8))
+
+## run either p4 or p5 and remove the legend.position=none and then run the legend extract. then make p5 again without legend
+#leg <- p4 %>% get_legend() %>% as_ggplot()
+
+p_suppl <- ggarrange(p2, p1, labels = c("B", "C"), ncol = 2)
+p_supple <- ggarrange(p, p_suppl, labels = c("A", ""), ncol = 1)
+ggsave(plot = p_supple, filename = "tables_and_figures/pdf/supl_serrated_div.pdf", width = 20, height = 16, unit = "cm")
+
+
+set.seed(1234)
+bray_dist_serr <- metaphlan_serr %>%
+  as.matrix() %>% 
+  vegan::vegdist(method= "bray") 
+
+set.seed(1234)
+adonis_out_serr <- vegan::adonis2(bray_dist_serr ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, by = "margin" , data=metadata_serr)
+
+##################################################
