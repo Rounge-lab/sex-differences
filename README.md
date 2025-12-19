@@ -7,18 +7,18 @@ Bucher-Johannessen et al.
 Gut microbiome signatures of colorectal cancer development are more pronounced in women compared to men in a population-based screening cohort.
 Available on [medRxiv](https://www.medrxiv.org/content/10.1101/2025.05.16.25327767v2.full).
 
-##Overview
+## Overview
 
 The scripts in this repository were used to perform statistical analyses and visualization of microbiome data stratified by sex, including diversity analyses, differential abundance testing, and multivariate statistics.
 
 All analyses were performed in R (version 4.2.0).
 
-##Data availability
+## Data availability
 
 This repository does not contain raw sequencing data.
 Processed taxonomic tables was generated using biobakery3 (including MetaPhlAn3 and HUManN3).
 
-##Software and packages
+## Software and packages
 
 Analyses were conducted in R v4.2.0 using the following main packages:
 - tidyverse (v1.3.1)
