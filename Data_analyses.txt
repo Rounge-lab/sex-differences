@@ -393,7 +393,6 @@ stacked_mod <- tbl_stack(models, group_header = c("Model 1: univariate", "Model 
 
 
 ####################
-## test 1
 ####################
 
 ## Diversity and composition -----------
@@ -469,7 +468,7 @@ anova_test_sex <- lapply(c("metadata_imp", "metadata"), function(dataset) {
 }) %>% 
   bind_rows()
 
-## 2. Stratified on sex and population as a whole?
+## 2. Stratified on sex and population as a whole
 ## making alpha diversity boxplots
 alpha_plot_finc <- lapply(c("metadata_women", "metadata_men"), function(dataset) { 
   if (dataset == "metadata_women") tmp_dataset <- metadata_women
@@ -1046,90 +1045,6 @@ diff_abund_finc_strat_geneo <-
 diff_abund_finc_strat_geneo %>% filter(metadata=="final_result_cat3_serr", qval <0.2) %>%  
   write_tsv("tables_and_figures/diff_abund/results_finc_strat_geneo.tsv")
 
-library(tidytext)
-(dotplot_sex_geneo_MF <- read.delim("tables_and_figures/diff_abund/results_sex_geneo.tsv") %>%  
-    filter(model == "model3" & dataset == "geneo_imp") %>% 
-    filter(qval < 0.05) %>% 
-    left_join(map_go_name) %>% 
-    filter(GO == "MF") %>% 
-    mutate(direction = ifelse(coef > 0, "Positive", "Negative")) %>% 
-    mutate(feature_long = paste(feature, pathway, sep=": ")) %>% 
-    mutate(pathway = str_remove(pathway, "\\[MF\\]")) %>% 
-    mutate(pathway = reorder(pathway, coef)) %>% 
-    #arrange(species) %>% 
-    ggplot() +
-    ylab("Log2FC") +
-    ggtitle("Molecular function") +
-    geom_point(aes(x=pathway, y=coef, color=direction), size=3) +
-    geom_linerange(aes(x=pathway, ymin = (coef-1.96*stderr), ymax = (coef+1.96*stderr)), color="#3C3C3C", position = position_dodge(width =0.5), linewidth=0.5) +
-    scale_color_manual(values=c("#0072B2", "#D55E00")) +
-    scale_x_discrete(labels = function(x) str_trunc(x, width = 65)) + ## truncates y axis
-    geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
-    theme_classic() +
-    theme(text=element_text(size=8),
-          legend.position = "none",
-          plot.title = element_text(size = 8, hjust=0.5),
-          axis.title.y = element_blank(),
-          axis.text.y = element_text(size = 8)) + 
-    #labs(y = "Differently abundant pathways", x = NULL , color = NULL, fill=NULL) +
-    coord_flip())
-
-(dotplot_sex_geneo_BP <- read.delim("tables_and_figures/diff_abund/results_sex_geneo.tsv") %>%  
-    filter(model == "model3" & dataset == "geneo_imp") %>% 
-    filter(qval < 0.05) %>% 
-    left_join(map_go_name) %>% 
-    filter(GO == "BP") %>% 
-    mutate(direction = ifelse(coef > 0, "Positive", "Negative")) %>% 
-    mutate(feature_long = paste(feature, pathway, sep=": ")) %>% 
-    mutate(pathway = str_remove(pathway, "\\[BP\\]")) %>% 
-    mutate(pathway = reorder(pathway, coef)) %>% 
-    #arrange(species) %>% 
-    ggplot() +
-    ylab("Log2FC") +
-    ggtitle("Biological processes") +
-    geom_point(aes(x=pathway, y=coef, color=direction), size=3) +
-    geom_linerange(aes(x=pathway, ymin = (coef-1.96*stderr), ymax = (coef+1.96*stderr)), color="#3C3C3C", position = position_dodge(width =0.5), linewidth=0.5) +
-    scale_color_manual(values=c("#0072B2", "#D55E00")) +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
-    theme_classic() +
-    theme(text=element_text(size=8),
-          legend.position = "none",
-          plot.title = element_text(size = 8, hjust=0.5),
-          axis.title.y = element_blank(),
-          axis.text.y = element_text(size = 8)) + 
-    #labs(y = "Differently abundant pathways", x = NULL , color = NULL, fill=NULL) +
-    coord_flip())
-
-(dotplot_sex_geneo_CC <- read.delim("tables_and_figures/diff_abund/results_sex_geneo.tsv") %>%  
-    filter(model == "model3" & dataset == "geneo_imp") %>% 
-    filter(qval < 0.05) %>% 
-    left_join(map_go_name) %>% 
-    filter(GO == "CC") %>% 
-    mutate(direction = ifelse(coef > 0, "Positive", "Negative")) %>% 
-    mutate(feature_long = paste(feature, pathway, sep=": ")) %>% 
-    mutate(pathway = str_remove(pathway, "\\[CC\\]")) %>% 
-    mutate(pathway = reorder(pathway, coef)) %>% 
-    #arrange(species) %>% 
-    ggplot() +
-    ylab("Log2FC") +
-    ggtitle("Cellular components") +
-    geom_point(aes(x=pathway, y=coef, color=direction), size=3) +
-    geom_linerange(aes(x=pathway, ymin = (coef-1.96*stderr), ymax = (coef+1.96*stderr)), color="#3C3C3C", position = position_dodge(width =0.5), linewidth=0.5) +
-    scale_color_manual(values=c("#0072B2", "#D55E00")) +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
-    theme_classic() +
-    theme(text=element_text(size=8),
-          legend.position = "none",
-          plot.title = element_text(size = 8, hjust=0.5),
-          axis.title.y = element_blank(),
-          axis.text.y = element_text(size = 8)) + 
-    #labs(y = "Differently abundant pathways", x = NULL , color = NULL, fill=NULL) +
-    coord_flip())
-
-figs <- ggarrange(dotplot_sex_geneo_BP, dotplot_sex_geneo_CC, ncol = 1, labels = c("B", "C"), heights = c(1, 0.2), align = "v")
-ggsave(figs, filename = "tables_and_figures/pdf/figureS1_BP_CC.pdf", width = 14, height = 20, unit="cm")
-ggsave(dotplot_sex_geneo_MF, filename = "tables_and_figures/pdf/figureS1_MF.pdf", width = 16, height = 20, unit="cm")
-
 figureS1 <- ggarrange(dotplot_sex_geneo_MF, figs, labels= c("A", ""), align = "h")
 ggsave(figureS1, filename = "tables_and_figures/pdf/figureS1.pdf", width = 30, height = 20, unit="cm")
 
@@ -1286,258 +1201,6 @@ ggsave(plot = p3, filename = "tables_and_figures/pdf/beta_div_plot_men.pdf", wid
 ggsave(plot = p4, filename = "tables_and_figures/pdf/beta_div_plot_women.pdf", width = 10, height = 10, unit = "cm")
 
 ###########################################
-
-
-############################ microbial score------
-
-## getting the names from model 3 that is significnalty differtent between sex
-mic_score_names <- diff_abund_sex %>% filter(metadata == "kjonn" & dataset == "metaphlan_imp" & model == "model3" & qval <0.05) %>% pull(feature)
-mic_score_names_pos <- diff_abund_sex %>% filter(metadata == "kjonn" & dataset == "metaphlan_imp" & model == "model3" & qval <0.05 & coef >0) %>% pull(feature)
-mic_score_names_neg <- diff_abund_sex %>% filter(metadata == "kjonn" & dataset == "metaphlan_imp" & model == "model3" & qval <0.05 & coef <0) %>% pull(feature)
-
-#Create the microbial score (DAA between sex for whole population)
-# not sure i get it, from anes code it almost looks like she has done it overall? not for each sample? or does she have the dataframe in long format?
-mic_score <- metaphlan %>%
-  dplyr::select(all_of(mic_score_names)) %>% 
-  rownames_to_column("sample_id") %>% 
-  #simple (as in paper) - all bacteria 
-  rowwise() %>%
-  mutate(mic_score_t = sum(c_across(all_of(mic_score_names_pos)), na.rm = TRUE),
-         mic_score_n = sum(c_across(all_of(mic_score_names_neg)), na.rm = TRUE),
-         log_mic_score_t = sum(log1p(c_across(all_of(mic_score_names_pos))), na.rm = TRUE),
-         log_mic_score_n = sum(log1p(c_across(all_of(mic_score_names_neg))), na.rm = TRUE))%>%
-  ungroup() %>%  
-  mutate(mic_score_t = ifelse(mic_score_t == 0, {min_val_half <- min(mic_score_t[mic_score_t > 0]) / 2; min_val_half}, mic_score_t), ## why not do it for the t
-         mic_score_n = ifelse(mic_score_n == 0, {min_val_half <- min(mic_score_n[mic_score_n > 0]) / 2; min_val_half}, mic_score_n),
-         log_mic_score_t = ifelse(log_mic_score_t == 0, {min_val_half <- min(log_mic_score_t[log_mic_score_t > 0]) / 2; min_val_half}, log_mic_score_t),
-         log_mic_score_n = ifelse(log_mic_score_n == 0, {min_val_half <- min(log_mic_score_n[log_mic_score_n > 0]) / 2; min_val_half}, log_mic_score_n)) %>% 
-  mutate(mic_score=log(mic_score_t/mic_score_n), 
-         log_mic_score=log(log_mic_score_t/log_mic_score_n))
-
-#Histograms - score as a whole 
-mic_score %>% 
-  dplyr::select(34:39) %>%
-  pivot_longer(cols=1:5, names_to = "variables", values_to = "value") %>% 
-  ggplot(aes(value)) + 
-  geom_histogram(binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3))) +
-  theme_classic() +
-  scale_fill_brewer() +
-  facet_wrap(~variables, scales = "free")
-
-
-#Desc stats - score as a whole
-mic_score %>% 
-  dplyr::select(34:39) %>%
-  skim() %>%  view()
-
-#Obs - very much weight given to the num!!
-#This also become clear from the plot below
-
-
-#Level of bacteria by direction of association (values used as is)
-
-metaphlan %>% 
-  dplyr::select(all_of(mic_score_names)) %>% 
-  pivot_longer(1:32,  names_to="variable", values_to="value") %>% 
-  mutate(dir = ifelse(variable %in% mic_score_names_pos, "Positive", "Negative")) %>% 
-  group_by(dir, variable) %>% 
-  summarize(median = signif(median(value, na.rm = TRUE), 3),
-            Q1 = signif(quantile(value, probs = 0.25, na.rm = TRUE), 3),
-            Q3 = signif(quantile(value, probs = 0.75, na.rm = TRUE), 3)) %>% 
-  as.data.frame() %>% 
-  dplyr::select(dir, variable, median, Q1, Q3) %>%
-  group_by(dir) %>%
-  mutate(variable_new = reorder(variable, median)) %>% 
-  arrange(variable_new) %>% 
-  ggplot(aes(x=fct_inorder(variable_new), y=median)) +
-  geom_errorbar(aes(ymin = Q1, ymax = Q3, color = dir), position = position_dodge(0.5), width = 0.3)+
-  geom_point(aes(color = dir), position = position_dodge(0.5)) +
-  coord_flip() +
-  xlab("") + ylab("") +
-  theme_classic() 
-
-## counting number of non-zeros for all bacteria
-metaphlan %>% dplyr::select(all_of(mic_score_names)) %>% t() %>% 
-  as.matrix() %>% as.data.frame() %>% 
-  rownames_to_column("sgb") %>% 
-  rowwise() %>%
-  mutate(above_zero = sum(c_across(2:1035) > 0)) %>%
-  mutate(sum_total = sum(c_across(2:1035))) %>% 
-  mutate(log_sum_total = log(sum(c_across(2:1035)))) %>% 
-  ungroup() %>% 
-  dplyr::select(sgb, above_zero, sum_total, log_sum_total) %>% 
-  left_join(mp4_names %>% dplyr::select(c(species, sgb))) %>% 
-  view()
-
-sd(mic_score$mic_score)
-
-#Make percentiles of the score
-mic_score <- mic_score %>%
-  mutate(mic_score_tertile = cut(mic_score, breaks = quantile(mic_score, probs = c(0, 0.3333, 0.66666, 1)), include.lowest = TRUE, labels = c("1", "2", "3")), 
-         mic_score_median = cut(mic_score, breaks = quantile(mic_score, probs = c(0, 0.5, 1)), include.lowest = TRUE, labels = c("1", "2")),
-         mic_score_SD = mic_score/2.686575) #Make per SD increase variable 
-
-hist(mic_score$mic_score)
-
-
-library(mediation)
-#Make a dataframe including controls and advnaced lesions only 
-mediation_df_dwl <- mic_score %>%
-  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
-  mutate(outcome = factor(detect_worthy_lesions, levels = c("negative", "positive")))
-
-mediation_df_na_al <- mic_score %>%
-  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
-  filter(final_result_cat3_serr != "Non-advanced adenoma") %>% 
-  mutate(outcome = factor(final_result_cat3_serr, levels = c("No adenoma", "Advanced lesion"))) %>% 
-  droplevels(.)
-
-mediation_df_na_naa <- mic_score %>%
-  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
-  filter(final_result_cat3_serr != "Advanced lesion") %>% 
-  mutate(outcome = factor(final_result_cat3_serr, levels = c("No adenoma", "Non-advanced adenoma"))) %>% 
-  droplevels(.)
-
-mediation_df_dwl %>% 
-  group_by(kjonn) %>% 
-  summarise(mean = mean(mic_score_SD))
-
-t.test(mic_score_SD ~ kjonn, data=mediation_df)
-
-## making a list of the datanames to be used in mediation analyses
-dataset_names <- c("mediation_df_dwl", "mediation_df_na_naa", "mediation_df_na_al")
-
-#Association analyses using the microbial score
-
-ass_mic_score_dwl <- glm(detect_worthy_lesions ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
-                         family = "binomial", data = mediation_df_dwl) %>%  
-  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
-  as.data.frame() %>% 
-  filter(term == "mic_score_SD")
-
-ass_mic_score_naa <- glm(final_result_cat3_serr ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
-                         family = "binomial", data = mediation_df_na_naa) %>%  
-  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
-  as.data.frame() %>% 
-  filter(term == "mic_score_SD")
-
-ass_mic_score_al <- glm(final_result_cat3_serr ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
-                        family = "binomial", data = mediation_df_na_al) %>%  
-  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
-  as.data.frame() %>% 
-  filter(term == "mic_score_SD")
-
-ass_mic_score <- ass_mic_score_dwl %>% rbind(ass_mic_score_al) %>% rbind(ass_mic_score_naa)
-
-ass_mic_score_finc <- multinom(final_result_cat3_serr ~ mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, 
-                               family = "binomial", data = mediation_df_dwl) %>%  
-  tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
-  as.data.frame() %>% 
-  filter(term == "mic_score_SD")
-
-
-## Mediation analyses 
-#Do a formal mediation analysis using the package mediation
-### doin it in a loop and the results have been checked manually in the development_leftover_script.R that it gives the same results
-## i cant seem to set scale(age_invitation) in the lm model but i dont think it matters? Ane
-## only one problem with the extract_mediation_summary function is that it reports 0.000 if the p-value is less than 0.001. not sure how to fix it
-dataset_names
-
-# Initialize a list to store results
-results_list <- list()
-
-for (tmp_dataset_name in dataset_names) {
-  # Get the actual dataset from the name
-  tmp_dataset <- get(tmp_dataset_name)
-  
-  # Fit the mediator model 
-  formula_mediator <- as.formula("mic_score_SD ~ kjonn + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump")
-  fit_mediator <- lm(formula_mediator, data=tmp_dataset)
-  print(summary(fit_mediator))
-  
-  # Fit the dependent variable model
-  formula_dv <- as.formula("outcome ~ kjonn + mic_score_SD + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump")
-  fit_dv <- glm(formula_dv, data=tmp_dataset, family = binomial)
-  print(summary(fit_dv))
-  
-  # Mediation analysis
-  set.seed(1234)
-  results <- mediate(fit_mediator, fit_dv, treat = 'kjonn', mediator = 'mic_score_SD', boot = TRUE, sims = 1000)
-  
-  # Process and store results
-  mediation_data_frame <- as.data.frame(extract_mediation_summary(summary(results))) %>% 
-    mutate(dataset = tmp_dataset_name)
-  results_list[[tmp_dataset_name]] <- mediation_data_frame 
-}
-
-# Combine all results into a single DataFrame
-all_results <- do.call(rbind, results_list) %>% 
-  rownames_to_column("term") %>% 
-  filter(str_detect(term, fixed("(average)")) | str_detect(term, fixed("Total"))) %>% 
-  write_tsv("tables_and_figures/mediation_analyses_results.tsv")
-
-all_results_all <- do.call(rbind, results_list) %>% 
-  rownames_to_column("term") %>% 
-  write_tsv("tables_and_figures/mediation_analyses_all_results.tsv")
-
-## mediate function with all bacteria
-####################
-# List of bacteria names as the independent variables
-mic_score_names
-
-mediation_df_log <- mediation_df_dwl %>% 
-  mutate(across(all_of(mic_score_names), LOG))
-
-# Initialize a list to store results
-results_list_taxa <- list()
-
-for (tmp_taxa in mic_score_names) {
-  # Fit the mediator model using dynamic column names
-  formula_mediator <- as.formula(paste(tmp_taxa, "~ kjonn"))
-  fit_mediator <- lm(formula_mediator, mediation_df_log)
-  print(summary(fit_mediator))
-  
-  # Fit the dependent variable model
-  formula_dv <- as.formula(paste("detect_worthy_lesions ~ kjonn +", tmp_taxa))
-  fit_dv <- glm(formula_dv, mediation_df_log, family = binomial)
-  print(summary(fit_dv))
-  
-  # Mediation analysis
-  set.seed(1234)
-  results <- mediate(fit_mediator, fit_dv, treat = 'kjonn', mediator = tmp_taxa, boot = TRUE, sims = 1000)
-  
-  # Process and store results
-  mediation_data_frame <- as.data.frame(extract_mediation_summary(summary(results))) %>% 
-    mutate(taxa = tmp_taxa)
-  results_list_taxa[[tmp_taxa]] <- mediation_data_frame 
-}
-# Optionally, combine all results into a single DataFrame
-all_results_taxa <- do.call(rbind, results_list_taxa) %>% 
-  rownames_to_column("term") %>% 
-  mutate(padj = p.adjust(`p-value`, method="BH")) %>% 
-  left_join(mp4_names, by=c("taxa"="sgb")) %>% 
-  filter(str_detect(term, fixed("(average)")) | str_detect(term, fixed("Total"))) %>% 
-  write_tsv("tables_and_figures/mediation_analyses_taxa_results.tsv")
-
-## checking how much the wcrf index mediates
-fit.totaleffect_sex=glm(detect_worthy_lesions ~ kjonn + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump, data=mediation_df_dwl, family="binomial")
-summary(fit.totaleffect_sex)
-tidy(fit.totaleffect_sex, exponentiate = TRUE, conf.int = TRUE)
-
-fit.mediator_sex=lm(wcrf_index_main~kjonn + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump, 
-                    data=mediation_df_dwl)
-summary(fit.mediator_sex)
-tidy(fit.mediator_sex, exponentiate = TRUE, conf.int = TRUE)
-
-fit.outcome_sex=glm(detect_worthy_lesions~kjonn + wcrf_index_main + age_invitation + senter + smoking2 + Sivilstatus_cat2 + Arbeid_lump, 
-                    family=binomial, data=mediation_df_dwl)
-summary(fit.outcome_sex)
-tidy(fit.outcome_sex, exponentiate = TRUE, conf.int = TRUE)
-set.seed(1234)
-results_sex = mediate(fit.mediator_sex, fit.outcome_sex, treat="kjonn", mediator="wcrf_index_main", boot = TRUE, sims = 1000)
-summary(results_sex)
-extract_mediation_summary(summary(results_sex))
-
 
 ####################### plot for DA
 #########################################
@@ -1983,25 +1646,6 @@ aov(shannon ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + sm
 aov(invsimpson ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, data = metadata_serr) %>% 
   tidy()
 
-(p <- metadata_serr %>% 
-    dplyr::select(shannon, invsimpson, final_result_cat3_serr, kjonn) %>% 
-    mutate(final_result_cat3_serr = case_when(
-      final_result_cat3_serr == "No adenoma" ~ "No adenoma",
-      final_result_cat3_serr == "Advanced lesion" ~ "Advanced serrated")) %>% 
-    mutate(Group = factor(final_result_cat3_serr, levels = c("No adenoma", "Advanced serrated"))) %>% 
-    pivot_longer(cols = 1:2, values_to = "value", names_to = "alpha") %>% 
-    mutate(alpha = factor(alpha, levels = c("invsimpson", "shannon"))) %>% 
-    ggplot(aes(y=value, x=kjonn, color = Group, fill=Group)) +
-    geom_boxplot(alpha = 0.4) +
-    xlab("") +
-    ylab("") + 
-    facet_wrap(~ alpha, scales="free") +
-    theme(text = element_text(color = "black", size=10))+
-    theme_bw() +
-    #theme(legend.position = "none") +
-    scale_fill_manual(values = c("No adenoma" = "#E69F00", "Advanced serrated" = "#5694E9")) +
-    scale_color_manual(values = c("No adenoma" = "#E69F00", "Advanced serrated" = "#5694E9")))
-
 ## sensitivity analyses
 metadata_men_sens <- metadata_imp %>% filter(advanced_serrated != 1 & kjonn == "Male") %>% droplevels()
 metadata_women_sens <- metadata_imp %>% filter(advanced_serrated != 1 & kjonn == "Female") %>% droplevels()
@@ -2061,53 +1705,6 @@ beta_results_strat_serr <- lapply(c("metaphlan_women_serr", "metaphlan_men_serr"
 }) %>% 
   bind_rows()
 
-
-# differential abundance 
-
-diff_abund_finc_strat_serr <-
-  lapply(c("metaphlan_men_serr", "metaphlan_women_serr"), function(dataset) { 
-    if (dataset == "metaphlan_men_serr") tmp_abund <- metaphlan_men_serr
-    if (dataset == "metaphlan_women_serr") tmp_abund <- metaphlan_women_serr
-    
-    if (dataset == "metaphlan_men_serr") tmp_metadata <- metadata_men
-    if (dataset == "metaphlan_women_serr") tmp_metadata <- metadata_women
-    
-    if (!dataset %in% list.dirs("results_finc_strat_serr/", full.names = FALSE)) dir.create(paste0("results_finc_strat_serr/", dataset), recursive = TRUE)
-    
-    lapply(c("model1", "model2", "model3"), function(model) {
-      if (model == "model1") adj_mod <- "final_result_cat3_serr"
-      if (model == "model2") adj_mod <- "final_result_cat3_serr,age_invitation,senter"
-      if (model == "model3") adj_mod <- "final_result_cat3_serr,age_invitation,senter,smoking2,wcrf_index_main,Sivilstatus_cat2,Arbeid_lump"
-      
-      tmp_maaslin <-
-        Maaslin2(
-          input_data = tmp_abund,
-          input_metadata = tmp_metadata,
-          min_prevalence = 0.1,
-          transform = "LOG",
-          normalization = "NONE",
-          analysis_method = "LM",
-          output = paste0("results_finc_strat_serr/", dataset, "/", adj_mod),
-          ## Add adjustment: Age + sex
-          fixed_effects = c(adj_mod),
-          reference = c("final_result_cat3_serr,No adenoma","Arbeid_lump,Employed","Utdanning,Primary_school"),
-          plot_heatmap = FALSE,
-          plot_scatter = FALSE
-        )
-      tmp_maaslin$results %>% 
-        tibble() %>% 
-        mutate(model = model,
-               dataset = dataset)
-    }) %>% 
-      bind_rows()
-  }) %>% 
-  bind_rows()
-
-set.seed(1234)
-bray_dist_men <- metaphlan_men_serr %>%
-  as.matrix() %>% 
-  vegan::vegdist(method= "bray") 
-
 p1 <- 
   bray_dist_men %>% 
   dist_to_PCoA(group_var = metaphlan_men_serr %>% 
@@ -2159,3 +1756,287 @@ set.seed(1234)
 adonis_out_serr <- vegan::adonis2(bray_dist_serr ~ final_result_cat3_serr*kjonn + scale(age_invitation) + senter + smoking2 + scale(wcrf_index_main) + Sivilstatus_cat2 + Arbeid_lump, by = "margin" , data=metadata_serr)
 
 ##################################################
+### testing previously CRC assocaited and validated bacteria from Piccino et al 2022 and Birkeland et al 2025. 
+
+### choosing only the significant taxa from Birkeland et al 2025
+vars <- readRDS("lit_rep_assoc.rds") %>% 
+  pull(feature) %>% 
+  unique() 
+
+men_table <- piccino_table %>%
+  filter(., kjonn == "Male") %>%
+  dplyr::select(-c(kjonn, age_invitation, senter, smoking2, wcrf_index_main, Sivilstatus_cat2, Arbeid_lump, sample_id)) %>% 
+  tbl_summary(
+    # The "by" variable
+    by = outcome,
+    missing = "no") %>% 
+  add_overall(last=T) %>%
+  add_n() %>% 
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits=3)) %>% 
+  add_stat_label() %>% 
+  modify_caption("") %>% 
+  as_flex_table() %>% 
+  save_as_docx(path="tables_and_figures/lit_rep_assoc_men_NACRC.docx")
+
+
+women_table <- piccino_table %>% 
+  filter(., kjonn == "Female") %>%
+  dplyr::select(-c(kjonn, age_invitation, senter, smoking2, wcrf_index_main, Sivilstatus_cat2, Arbeid_lump, sample_id)) %>% 
+  tbl_summary(
+    # The "by" variable
+    by = outcome,
+    missing = "no") %>% 
+  add_overall(last=T) %>%
+  add_n() %>% 
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits=3)) %>% 
+  add_stat_label() %>% 
+  modify_caption("") %>% 
+  as_flex_table() %>% 
+  save_as_docx(path="tables_and_figures/lit_rep_assoc_women_NACRC.docx")
+
+
+overall_table <- piccino_table %>% 
+  dplyr::select(-c(outcome, age_invitation, senter, smoking2, wcrf_index_main, Sivilstatus_cat2, Arbeid_lump, sample_id)) %>% 
+  tbl_summary(
+    # The "by" variable
+    by = kjonn,
+    missing = "no") %>% 
+  add_overall(last=T) %>%
+  add_n() %>% 
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits=3)) %>% 
+  add_stat_label() %>% 
+  modify_caption("") %>% 
+  as_flex_table() %>% 
+  save_as_docx(path="tables_and_figures/lit_rep_assoc_overall.docx")
+
+### performing logistic regression
+
+glm_strat <- lapply(c("strat_men", "strat_women"), function(dataset) {
+  if (dataset == "strat_men")  tmp_dataset <- piccino_table %>% filter(kjonn == "Male")
+  if (dataset == "strat_women") tmp_dataset <- piccino_table %>% filter(kjonn == "Female")
+  
+  lapply(vars, function(tx) {
+    if (!tx %in% names(tmp_dataset)) {
+      warning(paste("Taxa", tx, "not found in dataset", dataset))
+      return(NULL)
+    }
+    
+    tmp <- tmp_dataset %>%
+      dplyr::rename(tmp_taxa = !!tx) %>%             # rename safely
+      mutate(
+        tmp_taxa = as.integer(tmp_taxa > 0),
+        outcome  = factor(outcome, levels = c("No adenoma","CRC"))
+      ) %>%
+      tidyr::drop_na(outcome, tmp_taxa)
+    
+    tmp %>%
+      glm(outcome ~ tmp_taxa + age_invitation + senter + smoking2 + wcrf_index_main + Sivilstatus_cat2 + Arbeid_lump, data = ., family = binomial) %>%
+      broom::tidy(conf.int = TRUE, exponentiate = TRUE) %>%
+      dplyr::mutate(sgb = tx, dataset = dataset) %>%
+      dplyr::filter(term == "tmp_taxa")
+  }) %>%
+    dplyr::bind_rows()
+}) %>%
+  dplyr::bind_rows()
+
+glm_strat <- glm_strat %>% left_join(species_names)
+#write_tsv(glm_strat, file = "tables_and_figures/glm_strat_crc_assoc_adjusted.tsv")
+glm_strat <- read_delim("tables_and_figures/glm_strat_crc_assoc_adjusted.tsv")
+
+(plot_glm_strat <- glm_strat %>% filter(names %in% c("SGB6011_Fusobacterium_nucleatum", "SGB1973_Porphyromonas_uenonis", "SGB1991_Porphyromonas_somerae", "SGB748_Peptostreptococcus_stomatis",
+                                                     "SGB6001_Fusobacterium_nucleatum", "SGB5842_Dialister_pneumosintes", "SGB7295_Gemella_morbillorum", "SGB14306_GGB9342_SGB14306",
+                                                     "SGB2328_Alistipes_ihumii")) %>% 
+  left_join(piccino %>% dplyr::select(c(names, direction))) %>% 
+  mutate(direction = if_else(is.na(direction), "positive CRC", direction)) %>% 
+  mutate(conf.high = ifelse(is.na(conf.low), NA, conf.high)) %>%
+  mutate(estimate = ifelse(is.na(conf.low), NA, estimate)) %>%
+  mutate(p = case_when(p.value < 0.05 ~ "sign", 
+                       p.value > 0.05 ~ "ns")) %>% 
+  mutate(names = factor(names, 
+                          levels = glm_strat %>% 
+                            filter(dataset %in% "strat_women") %>% 
+                            arrange(estimate) %>% 
+                            pull(names))) %>% 
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high,
+             y = names, color = dataset, shape = p)) +
+  geom_errorbarh(height = 0.2, color = "grey30") + 
+  geom_point(size = 3) +
+  scale_x_log10() +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey60") +
+  scale_color_manual(values = c("strat_men" = "#D55E00", "strat_women" = "#0072B2")) +
+  facet_wrap(~ dataset) + 
+  theme_classic() +
+  theme(legend.position = "NONE", text=element_text(size=8)) + 
+  labs(x = "Odds ratio (log scale)", y = NULL)) 
+
+ggsave(plot = plot_glm_strat, file = "crc_assoc_adjusted.pdf", 
+       width = 17, height = 10, unit = "cm")
+
+######### E coli 
+
+colibactin <- colibactin_data %>% 
+  left_join(metadata_imp %>% rownames_to_column("sample_id")) %>% 
+  mutate(outcome = case_when(final_result_cat7 == "Advanced serrated" ~ "Advanced serrated",
+                             final_result_cat7 == "Advanced adenoma" ~ "Advanced adenoma",
+                             final_result_cat7 == "CRC" ~ "CRC",
+                             final_result_cat3_serr == "Non-advanced adenoma" ~ "Non-advanced adenoma",
+                             final_result_cat3_serr == "No adenoma" ~ "No adenoma")) %>% 
+  dplyr::select(c(sample_id, kjonn, outcome, age_invitation, senter, smoking2, wcrf_index_main, final_result_cat_neg, final_result_cat3_serr, detect_worthy_lesions, Sivilstatus_cat2, Arbeid_lump, pks_classification, ecoli_pos)) %>% 
+  mutate(across(where(is.character), as.factor)) %>% 
+  mutate(pks = paste(ecoli_pos, pks_classification)) %>% 
+  filter(kjonn == "Male") %>% 
+  filter(final_result_cat_neg %in% c("Cancer", "Negative")) %>% 
+  droplevels() %>% 
+  mutate(final_result_cat_neg = factor(final_result_cat_neg, levels = c("Negative", "Cancer")))
+                                       
+evaluate_ecoli_assoc <- function(dat, outcome, pks_strat) {
+  if (!outcome %in% c("detect_worthy_lesions", "final_result_cat_neg")) stop("invalid outcome variable")
+  ecoli_vars <- paste0("ecoli_pos", ifelse(pks_strat, "+pks_classification+","+")) 
+  adj_vars <- c("senter",
+                "age_invitation",
+                "wcrf_index_main",
+                "smoking2",
+                "Sivilstatus_cat2", 
+                "Arbeid_lump")
+  tmp_formula <- as.formula(paste0(outcome, "~", ecoli_vars, paste0(adj_vars, collapse = "+")))
+  
+  if (outcome == "detect_worthy_lesions") {
+    tmp_mod <- glm(tmp_formula, data = dat, family = "binomial")
+  } else {
+    tmp_mod <- glm(tmp_formula, data = dat, family = "binomial") #multinom(tmp_formula, data = dat)
+  }
+  tmp_mod %>% 
+    tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+    filter(str_detect(term, "^(pks|ecoli)"))
+}
+
+ecoli_pres_abs_models <-
+  tibble(outcome_var = rep(c("detect_worthy_lesions", "final_result_cat_neg"), each = 2),
+         pks_strat = c(FALSE, TRUE, FALSE, TRUE)) %>% 
+  mutate(cb_dat = lapply(seq(nrow(.)), function(x) colibactin)) %>% 
+  rowwise() %>% 
+  mutate(ecoli_eval = list(evaluate_ecoli_assoc(dat = cb_dat, outcome = outcome_var, pks_strat = pks_strat))) %>% 
+  dplyr::select(-cb_dat) %>% 
+  unnest(ecoli_eval) %>% 
+  #mutate(test_level = ifelse(is.na(y.level), "CRC-related findings", y.level) %>% 
+  #         factor(levels = c("CRC-related findings", levels(metadata_imp$final_result_cat_neg)[-1]))) %>% 
+  mutate(pks_lab = case_when(term == "ecoli_pospresent" & pks_strat == FALSE ~ "Any E coli detected",
+                             term == "ecoli_pospresent" & pks_strat == TRUE ~ "pks negative E coli detected",
+                             str_detect(term, "pks positive") & pks_strat == TRUE ~ "pks positive E coli detected")) %>% 
+  mutate(pks_strat = factor(pks_strat, labels = c("E coli detection overall", "E coli detection stratified by pks status")))
+
+ecoli_pres_abs_models_female <- ecoli_pres_abs_models
+ecoli_pres_abs_models_male <- ecoli_pres_abs_models
+
+ecoli_pres_abs_models_female <- ecoli_pres_abs_models_female %>% mutate(sex = "Female")
+ecoli_pres_abs_models_male <- ecoli_pres_abs_models_male %>% mutate(sex = "Male")
+
+ecoli <- rbind(ecoli_pres_abs_models_female, ecoli_pres_abs_models_male)
+
+ecoli_pres_abs_models %>% 
+  write_tsv("tables_and_figures/ecoli_pks_detection_outcomes_men_NACRC.tsv")
+
+
+glm(outcome ~ pks_classification + age_invitation + senter + Sivilstatus_cat2 + smoking2 + Arbeid_lump, data = colibactin, family = "binomial") %>% 
+  tidy(., exponentiate = TRUE, conf.int = TRUE)
+
+glm(outcome ~ ecoli_pos + age_invitation + senter + Sivilstatus_cat2 + smoking2 + Arbeid_lump, data = colibactin, family = "binomial") %>% 
+  tidy(., exponentiate = TRUE, conf.int = TRUE)
+
+### making plot of e.coli association
+
+e_coli_table_all <- read.csv("tables_and_figures/export/export_CBJ/e_coli_table_all.csv")
+e_coli_plot <- e_coli_table_all %>%
+  filter(Contrast != "CRC-related findings") %>% 
+  mutate(Contrast = factor(Contrast, levels = c("CRC", "Advanced lesion", "Non-advanced adenoma"))) %>% 
+  mutate(p = case_when(p.value < 0.05 ~ "sign", 
+                       p.value > 0.05 ~ "ns")) %>% 
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high,
+             y = Contrast, color = Contrast, shape = p)) +
+  geom_errorbarh(height = 0.2, color = "grey30") + 
+  geom_point(size = 2) +
+  scale_x_log10() +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey60") +
+  scale_color_manual(values = c("Non-advanced adenoma" = "#006D73", "Advanced lesion" = "#56B4E9", "CRC" = "#7570B3")) +
+  facet_wrap(~ pks_lab + strat, ncol = 2) + 
+  theme_classic() +
+  theme(legend.position = "none", text=element_text(size=8)) + 
+  labs(x = "Odds ratio (log scale)", y = NULL) 
+
+ggsave(plot = e_coli_plot, file = "tables_and_figures/ecoli_plot.pdf")
+
+ggarrange(plot_glm_strat, e_coli_plot, widths = c(1, 0.8), labels = c("A", "B")) %>% 
+  ggsave(., file = "tables_and_figures/lit_rep_ecoli_plot.pdf",
+         width = 19, height = 10, unit = "cm")
+
+###############
+cols_to_split <- c("CRC","No.adenoma","Overall")
+
+lit_rep_assoc <- read.csv("tables_and_figures/lit_rep_CRCNA_men.csv", sep=";") %>% 
+  mutate(dataset = "strat_men") %>% 
+  head(., -1) %>% 
+  rbind(read.csv("tables_and_figures/lit_rep_CRCNA_women.csv", sep=";") %>% 
+  mutate(dataset = "strat_women") %>% 
+  head(., -1)) %>% 
+  mutate(Characteristic = str_replace_all(Characteristic, ", n \\(%\\)", "")) %>% 
+  separate(Characteristic, into = c("SGB", "Bacteria"), sep = "_", extra = "merge") %>% 
+  mutate(across(
+    all_of(cols_to_split),
+    ~ str_extract(.x, "^[0-9]+") %>% as.numeric(),
+    .names = "{.col}_count"
+  )) %>%
+  mutate(across(
+    all_of(cols_to_split),
+    ~ str_extract(.x, "(?<=\\()[0-9.]+") %>% as.numeric(),
+    .names = "{.col}_percent"
+  )) %>%
+  dplyr::select(-all_of(cols_to_split)) 
+
+# plotting a heatmap
+group_cols <- grep("_percent$", names(lit_rep_assoc), value = TRUE)
+
+heatmap_plot <- lit_rep_assoc %>% 
+  group_by(SGB) %>%
+  filter(any(p.value < 0.05)) %>%
+  ungroup() %>% 
+  dplyr::select(-contains("count")) %>% 
+  pivot_longer(
+    all_of(group_cols),
+    names_to  = "group",
+    values_to = "percent") %>% 
+  mutate(
+    group = str_remove(group, "_percent$"),
+    sig = ifelse(p.value < 0.05, "*", "")) %>% 
+  filter(group != "Overall") %>% 
+  mutate(group = factor(group, levels = c("No.adenoma", "CRC")))
+
+sig_labels <- heatmap_plot %>%
+  mutate(feature_sgb = paste0(SGB, "_", Bacteria)) %>% 
+  distinct(feature_sgb, dataset, sig = ifelse(p.value < 0.05, "*", "")) %>% 
+  mutate(group = "Significance", percent = NA_real_) %>% 
+  mutate(group = factor(group, levels = c("No.adenoma", "CRC", "Significance")))
+
+plot_with_sig <- bind_rows(heatmap_plot, sig_labels) %>% 
+  #mutate(group = factor(group, levels = grp_levels)) %>% 
+  filter(group == "CRC" | group == "No.adenoma") %>% 
+  mutate(group = factor(group, levels = c("No.adenoma", "CRC", "Significance"))) %>% 
+  mutate(feature_sgb = paste0(SGB, "_", Bacteria)) %>% 
+  mutate(sgb = paste0(SGB, "_", Bacteria)) %>%
+  left_join(glm_strat, by = c("sgb", "dataset"))
+
+(F3_C <- ggplot(plot_with_sig, aes(x = group, y = feature_sgb, fill = percent)) +
+  geom_tile() +
+  geom_text(data = sig_labels, aes(label = sig), size = 5, na.rm = TRUE) +
+    geom_text(data = glm_strat, aes(label = estimate)) +
+  scale_fill_gradient(
+    low = "white", high = "steelblue",
+    name = "Percent",
+    limits = c(0, 100),           # optional: adjust range if you have percentages
+    na.value = "grey95") +
+  facet_wrap(~ dataset, nrow = 1) +
+  labs(x = "Group", y = "Species", title = "") +
+  theme_minimal(base_size = 8) +
+  labs(y = NULL, x = NULL , color = NULL, fill=NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()))
+
